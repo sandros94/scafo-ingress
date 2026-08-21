@@ -253,6 +253,15 @@ a time, and the agent is responsible for expiring locks left behind by a crashed
 holder. Without that expiry a crash would wedge certificate issuance for that
 name until the lock is cleared by hand.
 
+## Credits
+
+This module exists because [certmagic-s3](https://github.com/ss098/certmagic-s3)
+showed how small a Caddy storage module can be — reading it is what convinced me
+the agent-backed design was worth building. Thanks to the
+[Caddy](https://caddyserver.com) and
+[CertMagic](https://github.com/caddyserver/certmagic) maintainers and
+contributors for the interfaces that make a module like this possible at all.
+
 ## Development
 
 ```sh

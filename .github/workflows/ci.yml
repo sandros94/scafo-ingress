@@ -213,7 +213,12 @@ jobs:
       # than inside the manifest list, and covers the multi-platform list the
       # tags point at. Verify with:
       #   gh attestation verify oci://ghcr.io/sandros94/scafo-caddy:edge -R sandros94/scafo-certmagic
+      #
+      # The store refuses user-owned PRIVATE repositories ("make this repository
+      # public"), so the step arms itself on visibility rather than failing on
+      # every run until then.
       - name: Attest provenance
+        if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.IMAGE }}

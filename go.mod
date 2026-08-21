@@ -1,4 +1,4 @@
-module github.com/sandros94/certmagic-scafo
+module github.com/sandros94/scafo-certmagic
 
 go 1.25.1
 

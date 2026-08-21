@@ -1,4 +1,4 @@
-# certmagic-scafo
+# scafo-certmagic
 
 A Caddy TLS storage module that keeps certificates, private keys and ACME
 account data in a bucket **without giving Caddy the bucket credentials**.
@@ -8,7 +8,7 @@ by turning every storage operation into an HTTP call to a colocated *scafo
 agent*. The agent owns the bucket connection; Caddy owns nothing but a loopback
 URL and a bearer token.
 
-- Module path: `github.com/sandros94/certmagic-scafo`
+- Module path: `github.com/sandros94/scafo-certmagic`
 - Caddy module ID: `caddy.storage.scafo`
 - License: Apache-2.0
 
@@ -37,7 +37,7 @@ of which is a cloud secret.
 Build a Caddy binary with the module compiled in:
 
 ```sh
-xcaddy build --with github.com/sandros94/certmagic-scafo
+xcaddy build --with github.com/sandros94/scafo-certmagic
 ```
 
 Or use the provided `Dockerfile`, which does the same inside the official

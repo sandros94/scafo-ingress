@@ -16,7 +16,7 @@ COPY . /src
 
 # The builder image pins the Caddy version through its own CADDY_VERSION
 # environment variable, so xcaddy needs no version argument here.
-RUN xcaddy build --with github.com/sandros94/certmagic-scafo=/src
+RUN xcaddy build --with github.com/sandros94/scafo-certmagic=/src
 
 FROM caddy:${CADDY_VERSION}
 

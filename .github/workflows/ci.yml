@@ -19,9 +19,13 @@ env:
   IMAGE: ghcr.io/sandros94/scafo-caddy
 
 jobs:
+  # Runners are pinned to the newest STABLE image pair rather than riding
+  # ubuntu-latest: the amd64 and arm64 legs must move between OS versions
+  # together, and -latest migrates only one of them. Bump both (and the
+  # coordination jobs) to 26.04 once its runner images leave preview.
   test:
     name: vet & test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -44,7 +48,7 @@ jobs:
     # do not publish, so a single native amd64 build is enough signal here; the
     # per-architecture builds happen on the publishing path below.
     name: xcaddy build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: test
     if: github.event_name == 'pull_request'
     permissions:
@@ -72,7 +76,7 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
@@ -100,6 +104,10 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          # No inline provenance: BuildKit would embed it as an extra manifest
+          # the registry UI lists as an "unknown/unknown" platform. Provenance
+          # is attested once, over the merged manifest list, in the merge job.
+          provenance: false
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
@@ -122,12 +130,14 @@ jobs:
 
   merge:
     # Collects the per-architecture digests into one multi-platform manifest
-    # list and puts the human-facing tags on it.
+    # list, puts the human-facing tags on it, and attests its provenance.
     name: publish manifest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     permissions:
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -191,4 +201,20 @@ jobs:
           docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
 
       - name: Inspect image
-        run: docker buildx imagetools inspect "${{ steps.meta.outputs.primary }}"
+        id: inspect
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${{ steps.meta.outputs.primary }}"
+          digest="$(docker buildx imagetools inspect "${{ steps.meta.outputs.primary }}" \
+            --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Provenance lives in GitHub's attestation store (Sigstore-backed) rather
+      # than inside the manifest list, and covers the multi-platform list the
+      # tags point at. Verify with:
+      #   gh attestation verify oci://ghcr.io/sandros94/scafo-caddy:edge -R sandros94/scafo-certmagic
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.inspect.outputs.digest }}

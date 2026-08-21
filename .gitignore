@@ -1,0 +1,30 @@
+# Compiled binaries and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/caddy
+/certmagic-scafo
+
+# Test and coverage output
+*.test
+*.out
+coverage.txt
+
+# Dependency directory (only present when vendoring)
+/vendor/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local environment overrides
+.env
+.env.local

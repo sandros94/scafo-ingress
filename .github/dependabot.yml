@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  # Action pins are the one dependency class nothing else in this repository
+  # keeps current, so Dependabot owns them outright.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  # There is deliberately no gomod entry. This module has exactly two direct
+  # requirements and neither is Dependabot's to move:
+  #
+  #   github.com/caddyserver/caddy/v2   owned by .github/workflows/track-caddy.yml,
+  #                                     which moves it in lockstep with the
+  #                                     Dockerfile's CADDY_VERSION pin. A
+  #                                     Dependabot bump would move one half of
+  #                                     that pair and break check-pins.sh.
+  #
+  #   github.com/caddyserver/certmagic  the interface this module implements,
+  #                                     and a dependency Caddy itself pins.
+  #                                     `go mod tidy` after a Caddy bump already
+  #                                     lands on the version that Caddy uses;
+  #                                     bumping ahead of Caddy would ship an
+  #                                     image whose certmagic is not the one the
+  #                                     embedded Caddy was built against.
+  #
+  # Everything else in go.mod is indirect, pulled in by Caddy, and follows it.

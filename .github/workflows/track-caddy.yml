@@ -1,0 +1,266 @@
+name: track-caddy
+
+# Follows Caddy's stable releases without a human in the loop.
+#
+# Once a day: read the canonical pin (the Dockerfile's ARG default) and
+# caddyserver/caddy's latest stable release, and if they differ, move both the
+# pin and go.mod onto it, verify the result, push it to main, cut the next
+# PATCH release of this module, and publish that release's images and binaries
+# -- all inside this one run.
+#
+# It has to be one run. Events created with the default GITHUB_TOKEN do not
+# start workflow runs, so the push to main would build nothing and the release
+# would publish nothing. Rather than reach for a personal access token, the
+# publishing half lives in a reusable workflow that this one calls directly.
+#
+# The contract is: a green run means either nothing needed doing or everything
+# got done, and the only run worth a human's attention is a red one.
+
+on:
+  schedule:
+    # Weekly, Monday early UTC at an unremarkable minute -- the top of the hour
+    # is the busiest slot on GitHub's scheduler and the most likely to be delayed.
+    # workflow_dispatch covers "Caddy just shipped, bump now" between runs.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # Never two trackers at once: the second would race the first's push to main.
+  group: track-caddy
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/sandros94/scafo-caddy
+
+jobs:
+  bump:
+    name: track caddy
+    runs-on: ubuntu-24.04
+    permissions:
+      # contents: write pushes the bump and drafts the release. Neither is
+      # exercised on a day when Caddy has not moved.
+      contents: write
+      # pull-requests: write belongs to the failure path only.
+      pull-requests: write
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      caddy: ${{ steps.check.outputs.latest }}
+      sha: ${{ steps.release.outputs.sha }}
+      release-tag: ${{ steps.release.outputs.release-tag }}
+      image-tags: ${{ steps.release.outputs.image-tags }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The next module version is computed from the existing release tags,
+          # which a shallow clone does not carry.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Compare the pin against the latest stable Caddy
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          latest="$(.github/scripts/caddy-latest.sh)"
+          current="v$(.github/scripts/caddy-pin.sh)"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$latest" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Already tracking Caddy ${current}; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Caddy ${current} to ${latest}." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Move the pin
+        if: steps.check.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          set -euo pipefail
+          # Both halves move together, from the same value: go.mod decides what
+          # the module compiles against, the Dockerfile ARG decides what the
+          # image and the binaries are built with.
+          go get "github.com/caddyserver/caddy/v2@${LATEST}"
+          go mod tidy
+          .github/scripts/caddy-pin.sh "$LATEST"
+          git --no-pager diff --stat
+
+      - name: Verify
+        id: verify
+        if: steps.check.outputs.changed == 'true'
+        # Failure here is an outcome, not the end of the run: the bump goes to a
+        # pull request instead of to main, and the run then fails loudly. This
+        # also catches the case where the new Caddy raises go.mod's go directive
+        # past the toolchain this run set up.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo '::group::check caddy pins'
+          .github/scripts/check-pins.sh
+          echo '::endgroup::'
+          echo '::group::go vet'
+          go vet ./...
+          echo '::endgroup::'
+          echo '::group::go test'
+          go test -race ./...
+          echo '::endgroup::'
+          echo '::group::docker build'
+          # The same xcaddy smoke build a pull request gets, at the new Caddy
+          # version, which is the check that catches interface drift.
+          docker build .
+          echo '::endgroup::'
+
+      - name: Push and draft the release
+        id: release
+        if: steps.check.outputs.changed == 'true' && steps.verify.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --all --message "chore: track caddy ${LATEST}"
+          git push origin HEAD:main
+          sha="$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+          # The module's own semver: the tracker may only add one to the patch.
+          # An empty result means this module has never been released, and the
+          # first release is a human's call -- so the commit still gets images,
+          # it just does not get a release.
+          next="$(git tag --list | .github/scripts/next-version.sh)"
+          echo "release-tag=$next" >> "$GITHUB_OUTPUT"
+
+          args=(--image "$IMAGE" --sha "$sha")
+          if [ -n "$next" ]; then
+            # The commit being released is also the new tip of main, so it is
+            # honestly :edge and :sha-... as well as :<version> and :latest.
+            args+=(--version "$next" --latest)
+          fi
+          {
+            echo "image-tags<<TAGS_EOF"
+            .github/scripts/image-tags.sh "${args[@]}"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ -z "$next" ]; then
+            echo "Pushed the bump to main. No release tag exists yet, so images were published without a release." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Drafted, not published: the assets are attached by the publish
+          # workflow that runs next, and a release should never be visible
+          # without them. The final job undrafts it. A draft is also the clean
+          # failure state -- no git tag exists until a draft is published, so a
+          # failed publish leaves nothing behind but the draft.
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          Tracks Caddy ${LATEST}. No module changes.
+
+          - Caddy: ${LATEST}
+          - Image: ${IMAGE}:${next#v}
+          - Binaries: scafo-caddy-linux-amd64, scafo-caddy-linux-arm64, each with a .sha256
+
+          The release binaries are the same ones inside the image, lifted out of its builder stage.
+          NOTES
+
+          gh release create "$next" \
+            --draft \
+            --target "$sha" \
+            --title "$next" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+
+          echo "Pushed the bump to main and drafted ${next}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open a pull request instead
+        if: steps.check.outputs.changed == 'true' && steps.verify.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # main only ever receives verified bumps. A broken one becomes a
+          # branch and a pull request, and the run fails so somebody sees it.
+          branch="track-caddy/${LATEST}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$branch"
+          git commit --all --message "chore: track caddy ${LATEST}"
+          # Force-pushed because the weekly cron retries until this is resolved,
+          # and each retry should update the branch rather than collide with
+          # the previous run's.
+          git push --force origin "$branch"
+
+          if [ "$(gh pr list --head "$branch" --state open --json number --jq 'length')" -eq 0 ]; then
+            cat > "$RUNNER_TEMP/body.md" <<BODY
+          Caddy ${LATEST} is out, but the automated bump does not pass verification, so it was not pushed to main.
+
+          The failing run shows which of check-pins, go vet, go test or docker build broke:
+          ${RUN_URL}
+
+          **CI on this pull request will not start on its own.** GitHub puts runs from a pull request opened with the default GITHUB_TOKEN into an approval-required state; use "Approve and run" in the merge box, or push a commit of your own onto the branch.
+
+          The weekly tracker force-pushes this branch until the bump either passes or is superseded by a newer Caddy release.
+          BODY
+            gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "chore: track caddy ${LATEST}" \
+              --body-file "$RUNNER_TEMP/body.md"
+          else
+            echo "A pull request for ${branch} is already open; its branch was updated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "Caddy ${LATEST} failed verification, so it went to a pull request instead of to main." >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+  publish:
+    name: publish
+    needs: bump
+    # success() is spelled out because a custom if replaces the implicit one,
+    # and nothing here may publish on the back of a failed verification.
+    if: success() && needs.bump.outputs.changed == 'true'
+    permissions:
+      # The union of what publish.yml's own jobs ask for: a called workflow can
+      # narrow these, never widen them.
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      ref: ${{ needs.bump.outputs.sha }}
+      image-tags: ${{ needs.bump.outputs.image-tags }}
+      release-tag: ${{ needs.bump.outputs.release-tag }}
+
+  finalize:
+    # The draft becomes a release only once its assets are attached, which is
+    # also the moment the git tag comes into existence.
+    name: publish the release
+    needs: [bump, publish]
+    if: success() && needs.bump.outputs.release-tag != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Undraft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.bump.outputs.release-tag }}
+          CADDY: ${{ needs.bump.outputs.caddy }}
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+          echo "Released ${RELEASE_TAG}, tracking Caddy ${CADDY}." >> "$GITHUB_STEP_SUMMARY"

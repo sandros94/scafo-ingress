@@ -1,0 +1,298 @@
+name: publish
+
+# The single publishing implementation. Every path that puts an artifact on the
+# internet -- a push to main, a human-published release, and the Caddy tracker
+# -- calls this workflow, so images and release binaries are produced in
+# exactly one place and the automated release is indistinguishable from the
+# hand-cut one.
+#
+# It is a reusable workflow rather than three event-triggered ones because
+# events created with the default GITHUB_TOKEN do not start workflow runs:
+# the tracker's push to main fires no `push` run and the release it creates
+# fires no `release: published` run. Being called keeps the whole chain inside
+# the single run that started it, which is what lets this repository automate
+# releases without a personal access token.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit SHA to build from. Always a SHA, never a moving ref.
+        required: true
+        type: string
+      image-tags:
+        description: >-
+          Whitespace-separated image references to put on the manifest list.
+          Produced by .github/scripts/image-tags.sh.
+        required: true
+        type: string
+      release-tag:
+        description: >-
+          Release to attach per-architecture binaries to. Empty publishes
+          images only.
+        required: false
+        default: ''
+        type: string
+
+# Jobs opt in to exactly the scopes they need. The calling job has to grant at
+# least this union, since permissions can only be reduced down a call chain.
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/sandros94/scafo-caddy
+
+jobs:
+  # Runners are pinned to the newest STABLE image pair rather than riding
+  # ubuntu-latest: the amd64 and arm64 legs must move between OS versions
+  # together, and -latest migrates only one of them. Bump every runs-on in this
+  # file to 26.04 once its runner images leave preview.
+  build:
+    # Each architecture is built on a runner of that architecture, so nothing is
+    # emulated and the two builds run in parallel. Images are pushed by digest
+    # only; the tags are attached later by the merge job, which is what keeps a
+    # tag from ever pointing at a half-published image.
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Prepare
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          # Artifact names cannot contain "/", so linux/amd64 becomes linux-amd64.
+          echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # No inline provenance: BuildKit would embed it as an extra manifest
+          # the registry UI lists as an "unknown/unknown" platform. Provenance
+          # is attested once, over the merged manifest list, in the merge job.
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # The digest is carried as a file *name*, not as file content: the
+          # merge job globs this directory to rebuild the source references.
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    # Collects the per-architecture digests into one multi-platform manifest
+    # list, puts the human-facing tags on it, and attests its provenance.
+    name: publish manifest
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        id: push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ inputs.image-tags }}
+        run: |
+          set -euo pipefail
+          # The caller decided which tags this build deserves; splitting on
+          # whitespace accepts both the one-per-line form the script prints and
+          # the flattened form a job output may arrive as.
+          tag_args=()
+          primary=""
+          # shellcheck disable=SC2086 # the word splitting is the parsing step
+          for tag in $TAGS; do
+            tag_args+=(-t "$tag")
+            [ -n "$primary" ] || primary="$tag"
+          done
+          if [ "${#tag_args[@]}" -eq 0 ]; then
+            echo "publish: image-tags input is empty" >&2
+            exit 1
+          fi
+          # Each file in this directory is named after one per-architecture
+          # digest, so the glob enumerates the manifest sources.
+          sources=()
+          for digest in *; do
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+          # One tag is enough to inspect the published manifest afterwards.
+          echo "primary=$primary" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect image
+        id: inspect
+        env:
+          PRIMARY: ${{ steps.push.outputs.primary }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$PRIMARY"
+          digest="$(docker buildx imagetools inspect "$PRIMARY" \
+            --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Provenance lives in GitHub's attestation store (Sigstore-backed) rather
+      # than inside the manifest list, and covers the multi-platform list the
+      # tags point at. Verify with:
+      #   gh attestation verify oci://ghcr.io/sandros94/scafo-caddy:edge -R sandros94/scafo-certmagic
+      #
+      # The store refuses user-owned PRIVATE repositories ("make this repository
+      # public"), so the step arms itself on visibility rather than failing on
+      # every run until then.
+      - name: Attest provenance
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.inspect.outputs.digest }}
+
+  binaries:
+    # Plain binaries for people who want the module without the image. Built on
+    # a runner of the target architecture for the same reason the images are.
+    name: binary ${{ matrix.platform }}
+    if: inputs.release-tag != ''
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Build binary
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # The binary is lifted out of the Dockerfile's builder stage rather
+          # than rebuilt by a second, hand-written xcaddy invocation. That stage
+          # already runs
+          #     xcaddy build --with github.com/sandros94/scafo-certmagic=/src
+          # inside caddy:<pin>-builder, against the source checked out here and
+          # never against the module proxy, so the asset is the same binary that
+          # is inside the image published from this very run -- and there is one
+          # build recipe in this repository instead of two that can drift.
+          docker build --target builder -t scafo-caddy-builder .
+          container="$(docker create scafo-caddy-builder)"
+          docker cp "$container:/usr/bin/caddy" "scafo-caddy-linux-${ARCH}"
+          docker rm "$container" > /dev/null
+          chmod +x "scafo-caddy-linux-${ARCH}"
+
+      - name: Verify binary
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # Cheap proof that the asset is a working Caddy with this module
+          # compiled in, rather than an upstream binary that happened to build.
+          "./scafo-caddy-linux-${ARCH}" version
+          "./scafo-caddy-linux-${ARCH}" list-modules | grep -qxF 'caddy.storage.scafo'
+          # sha256sum's own format, so `sha256sum -c` works on the download.
+          sha256sum "scafo-caddy-linux-${ARCH}" > "scafo-caddy-linux-${ARCH}.sha256"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: scafo-caddy-linux-${{ matrix.arch }}*
+          if-no-files-found: error
+          retention-days: 1
+
+  release-assets:
+    # Assets are attached from one job after every architecture has succeeded,
+    # so a release is never left holding half of its binaries.
+    name: attach release assets
+    # success() is spelled out because a custom if replaces the implicit one a
+    # "needs" would otherwise carry, and a half-built set of binaries must not
+    # reach a release.
+    if: success() && inputs.release-tag != ''
+    runs-on: ubuntu-24.04
+    needs: binaries
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: binaries-*
+          merge-multiple: true
+
+      - name: Attach assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          # Which Caddy this release embeds, as a one-line asset so a script can
+          # answer that question without parsing the release notes.
+          printf 'v%s\n' "$(.github/scripts/caddy-pin.sh)" > dist/caddy-version
+          # --clobber so a re-run of a failed publish replaces its own leftovers
+          # instead of erroring on them.
+          gh release upload "$RELEASE_TAG" dist/* --clobber

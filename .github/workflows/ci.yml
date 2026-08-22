@@ -22,7 +22,8 @@ jobs:
   # Runners are pinned to the newest STABLE image pair rather than riding
   # ubuntu-latest: the amd64 and arm64 legs must move between OS versions
   # together, and -latest migrates only one of them. Bump both (and the
-  # coordination jobs) to 26.04 once its runner images leave preview.
+  # coordination jobs, here and in publish.yml) to 26.04 once its runner images
+  # leave preview.
   test:
     name: vet & test
     runs-on: ubuntu-24.04
@@ -35,6 +36,9 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+
+      - name: check caddy pins
+        run: .github/scripts/check-pins.sh
 
       - name: go vet
         run: go vet ./...
@@ -50,7 +54,9 @@ jobs:
     name: xcaddy build
     runs-on: ubuntu-24.04
     needs: test
-    if: github.event_name == 'pull_request'
+    # success() is spelled out throughout this file because a custom if
+    # replaces the implicit one that a "needs" would otherwise carry.
+    if: success() && github.event_name == 'pull_request'
     permissions:
       contents: read
     steps:
@@ -59,167 +65,67 @@ jobs:
       - name: docker build
         run: docker build .
 
-  build:
-    # Each architecture is built on a runner of that architecture, so nothing is
-    # emulated and the two builds run in parallel. Images are pushed by digest
-    # only; the tags are attached later by the merge job, which is what keeps a
-    # tag from ever pointing at a half-published image.
-    name: build ${{ matrix.platform }}
-    runs-on: ${{ matrix.runner }}
+  tags:
+    # What this run has earned the right to tag. Kept out of publish.yml so the
+    # reusable workflow stays a publisher and not a policy: the tracker decides
+    # its own tags the same way, through the same script.
+    name: compute tags
+    runs-on: ubuntu-24.04
     needs: test
-    if: github.event_name != 'pull_request'
+    if: success() && github.event_name != 'pull_request'
     permissions:
       contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-24.04
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+    outputs:
+      image-tags: ${{ steps.compute.outputs.tags }}
     steps:
-      - name: Prepare
-        env:
-          PLATFORM: ${{ matrix.platform }}
-        run: |
-          set -euo pipefail
-          # Artifact names cannot contain "/", so linux/amd64 becomes linux-amd64.
-          echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
-
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          # No inline provenance: BuildKit would embed it as an extra manifest
-          # the registry UI lists as an "unknown/unknown" platform. Provenance
-          # is attested once, over the merged manifest list, in the merge job.
-          provenance: false
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export digest
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          set -euo pipefail
-          # The digest is carried as a file *name*, not as file content: the
-          # merge job globs this directory to rebuild the source references.
-          mkdir -p "${{ runner.temp }}/digests"
-          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ env.PLATFORM_PAIR }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  merge:
-    # Collects the per-architecture digests into one multi-platform manifest
-    # list, puts the human-facing tags on it, and attests its provenance.
-    name: publish manifest
-    runs-on: ubuntu-24.04
-    needs: build
-    permissions:
-      packages: write
-      id-token: write
-      attestations: write
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: ${{ runner.temp }}/digests
-          pattern: digests-*
-          merge-multiple: true
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Compute image tags
-        id: meta
+        id: compute
         env:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           set -euo pipefail
+          args=(--image "$IMAGE")
           if [ "$EVENT_NAME" = "release" ]; then
-            # Image tags carry the bare semver, without the git tag's "v".
-            version="${RELEASE_TAG#v}"
-            tags="${IMAGE}:${version}"
+            args+=(--version "$RELEASE_TAG")
             # A prerelease must never move the "latest" pointer.
             if [ "$RELEASE_PRERELEASE" != "true" ]; then
-              tags="${tags}"$'\n'"${IMAGE}:latest"
+              args+=(--latest)
             fi
           else
-            tags="${IMAGE}:edge"$'\n'"${IMAGE}:sha-${GITHUB_SHA:0:7}"
+            args+=(--sha "$GITHUB_SHA")
           fi
           {
             echo "tags<<TAGS_EOF"
-            echo "$tags"
+            .github/scripts/image-tags.sh "${args[@]}"
             echo "TAGS_EOF"
-            # One tag is enough to inspect the published manifest afterwards.
-            echo "primary=$(echo "$tags" | head -n 1)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create manifest list and push
-        working-directory: ${{ runner.temp }}/digests
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          set -euo pipefail
-          tag_args=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            tag_args+=(-t "$tag")
-          done <<< "$TAGS"
-          # Each file in this directory is named after one per-architecture
-          # digest, so the glob enumerates the manifest sources.
-          sources=()
-          for digest in *; do
-            sources+=("${IMAGE}@sha256:${digest}")
-          done
-          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
-
-      - name: Inspect image
-        id: inspect
-        run: |
-          set -euo pipefail
-          docker buildx imagetools inspect "${{ steps.meta.outputs.primary }}"
-          digest="$(docker buildx imagetools inspect "${{ steps.meta.outputs.primary }}" \
-            --format '{{json .Manifest}}' | jq -r .digest)"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      # Provenance lives in GitHub's attestation store (Sigstore-backed) rather
-      # than inside the manifest list, and covers the multi-platform list the
-      # tags point at. Verify with:
-      #   gh attestation verify oci://ghcr.io/sandros94/scafo-caddy:edge -R sandros94/scafo-certmagic
-      #
-      # The store refuses user-owned PRIVATE repositories ("make this repository
-      # public"), so the step arms itself on visibility rather than failing on
-      # every run until then.
-      - name: Attest provenance
-        if: github.event.repository.visibility == 'public'
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.inspect.outputs.digest }}
+  publish:
+    # One call covers both publishing events. On a push there is no release, so
+    # release-tag arrives empty -- github.event.release is null outside a
+    # release event -- and publish.yml skips the binary jobs.
+    #
+    # The permissions here are the union of what publish.yml's jobs ask for,
+    # not the minimum this event needs, because a called workflow may only
+    # narrow the caller's grant: asking for more than the caller holds is a
+    # hard error, even from a job that would have been skipped. Nothing is over-
+    # privileged as a result -- this job runs no steps of its own, and each job
+    # inside publish.yml declares the narrower set it actually uses.
+    name: publish
+    needs: tags
+    if: success() && github.event_name != 'pull_request'
+    permissions:
+      # contents: write attaches binaries to the release being published.
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      ref: ${{ github.sha }}
+      image-tags: ${{ needs.tags.outputs.image-tags }}
+      release-tag: ${{ github.event.release.tag_name }}

@@ -1,9 +1,9 @@
 # scafo storage protocol v1
 
 This is the canonical description of the wire contract between
-[scafo-certmagic](README.md) and a scafo agent. It is normative: an agent that
-satisfies everything below is a correct peer for this module, and this module
-sends nothing beyond it.
+[scafo-certmagic](README.md) and a scafo node daemon. It is normative: a daemon
+that satisfies everything below is a correct peer for this module, and this
+module sends nothing beyond it.
 
 The base URL is the module's configured `endpoint`. A path prefix on that URL is
 preserved, so every path below is appended to it.
@@ -17,7 +17,7 @@ Every request carries both:
 | `Authorization` | `Bearer <token>`, the trimmed token from `token` or `token_file` |
 | `X-Scafo-Storage-Version` | `1` |
 
-The version header exists so an agent can reject a client it cannot serve.
+The version header exists so a daemon can reject a client it cannot serve.
 
 ## Key encoding
 
@@ -29,7 +29,7 @@ certificates/acme-v02.api.letsencrypt.org-directory/example.com/example.com.crt
 ```
 
 A key maps onto the request path as-is: each component is percent-encoded
-individually and the `/` separators are preserved, so the agent sees the same
+individually and the `/` separators are preserved, so the daemon sees the same
 hierarchy the caller used. Keys passed as query parameters (`list`, `stat`) use
 ordinary form encoding.
 
@@ -61,7 +61,7 @@ found", not as an empty result.
 }
 ```
 
-`modified` is an RFC 3339 timestamp, or `null` when the agent does not know it;
+`modified` is an RFC 3339 timestamp, or `null` when the daemon does not know it;
 `null` becomes CertMagic's zero time, which it treats as "unknown".
 `isTerminal` is `true` for keys that hold a value and `false` for keys that
 merely act as a prefix for other keys ("directories").
@@ -72,9 +72,9 @@ merely act as a prefix for other keys ("directories").
 lock is currently held elsewhere. The client then waits one second and retries,
 indefinitely, until the lock is granted or the caller's context is cancelled.
 Any other error status ends the attempt immediately rather than being retried,
-so a broken agent surfaces as a failure instead of an endless poll.
+so a broken daemon surfaces as a failure instead of an endless poll.
 
-Exactly one holder may hold a given lock name at a time. **The agent is
+Exactly one holder may hold a given lock name at a time. **The daemon is
 responsible for expiring locks left behind by a crashed holder.** Without that
 expiry, one crash wedges certificate issuance for that name until the lock is
 cleared by hand — which is also what makes several Caddy instances able to
@@ -92,7 +92,7 @@ the error reports the status code alone.
 A `404` is translated into an error wrapping `io/fs.ErrNotExist`, which is what
 CertMagic checks with `errors.Is` to distinguish a missing key from a broken
 backend. Getting this wrong makes CertMagic treat absent certificates as
-infrastructure failures, so **agents must return `404` — not `500` — for keys
+infrastructure failures, so **node daemons must return `404` — not `500` — for keys
 that do not exist**.
 
 ## Client behaviour
@@ -101,6 +101,6 @@ The module uses a dedicated HTTP client with a 30-second per-request timeout.
 That timeout does not bound `Lock`, which blocks until the lock is acquired or
 its context is done.
 
-It performs no retries other than the lock poll described above: the agent is
+It performs no retries other than the lock poll described above: the daemon is
 colocated, so a failure is a fault to report rather than a transient to paper
 over.

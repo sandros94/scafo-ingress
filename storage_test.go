@@ -30,7 +30,7 @@ func newTestStorage(t *testing.T, handler http.Handler) *Storage {
 	return NewStorage(base, testToken)
 }
 
-// notFound writes the agent's 404 response, including a problem document so
+// notFound writes the daemon's 404 response, including a problem document so
 // the tests also cover error decoding on the not-found path.
 func notFound(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/problem+json")
@@ -271,7 +271,7 @@ func TestExists(t *testing.T) {
 			want:    false,
 		},
 		{
-			name: "agent failure is not existence",
+			name: "node failure is not existence",
 			respond: func(w http.ResponseWriter) {
 				w.WriteHeader(http.StatusInternalServerError)
 			},

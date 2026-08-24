@@ -20,8 +20,8 @@ func init() {
 // Storage client and hands it to Caddy as the TLS asset store.
 //
 // Caddy never learns the credentials of the underlying bucket: it is given a
-// loopback endpoint and a bearer token, both provisioned by the scafo agent
-// that owns the bucket.
+// loopback endpoint and a bearer token, both provisioned by the scafo node
+// daemon that owns the bucket.
 //
 // JSON configuration:
 //
@@ -52,18 +52,18 @@ func init() {
 //	  }
 //	}
 type Module struct {
-	// Endpoint is the base URL of the scafo agent's storage API, for example
-	// http://127.0.0.1:7400. A path prefix is allowed and is preserved.
+	// Endpoint is the base URL of the scafo node daemon's storage API, for
+	// example http://127.0.0.1:7400. A path prefix is allowed and is preserved.
 	// Required.
 	Endpoint string `json:"endpoint,omitempty"`
 
-	// Token is the bearer token to present to the agent, given inline. It is
+	// Token is the bearer token to present to the daemon, given inline. It is
 	// trimmed of surrounding whitespace, exactly as file content is. Exactly
 	// one of Token and TokenFile is required.
 	Token string `json:"token,omitempty"`
 
 	// TokenFile is the path to a file containing the bearer token to present
-	// to the agent. The file is read once during provisioning and its content
+	// to the daemon. The file is read once during provisioning and its content
 	// is trimmed of surrounding whitespace. Exactly one of Token and TokenFile
 	// is required.
 	TokenFile string `json:"token_file,omitempty"`
@@ -207,7 +207,7 @@ func (m *Module) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 }
 
 // Cleanup releases the idle connections held by the provisioned client, so a
-// configuration reload does not leave sockets to the agent behind. It is safe
+// configuration reload does not leave sockets to the daemon behind. It is safe
 // to call even when Provision failed.
 func (m *Module) Cleanup() error {
 	if m.storage != nil {

@@ -1,7 +1,7 @@
 // Package scafo provides a certmagic.Storage implementation that delegates
-// every storage operation to a colocated scafo agent over HTTP.
+// every storage operation to a colocated scafo node daemon over HTTP.
 //
-// The agent owns the actual bucket (or whatever backing store it is configured
+// The daemon owns the actual bucket (or whatever backing store it is configured
 // with) and is the only party holding bucket credentials. The process using
 // this package holds nothing but a loopback endpoint URL and a bearer token, so
 // a compromised TLS terminator cannot reach the bucket directly.
@@ -29,20 +29,20 @@ import (
 )
 
 // ProtocolVersion is the storage protocol version this client speaks. It is
-// sent on every request in the X-Scafo-Storage-Version header so the agent can
-// reject clients it cannot serve.
+// sent on every request in the X-Scafo-Storage-Version header so the daemon
+// can reject clients it cannot serve.
 const ProtocolVersion = "1"
 
 // versionHeader carries ProtocolVersion on every request.
 const versionHeader = "X-Scafo-Storage-Version"
 
-// DefaultRequestTimeout bounds a single request to the agent. The agent is
+// DefaultRequestTimeout bounds a single request to the daemon. The daemon is
 // colocated, so anything slower than this is a fault rather than latency.
 // It does not bound Lock, which blocks until the lock is acquired or the
 // context is done.
 const DefaultRequestTimeout = 30 * time.Second
 
-// LockPollInterval is how long Lock waits before retrying after the agent
+// LockPollInterval is how long Lock waits before retrying after the daemon
 // reports that the lock is held elsewhere (HTTP 409).
 const LockPollInterval = time.Second
 
@@ -51,16 +51,16 @@ const LockPollInterval = time.Second
 const maxErrorBodySize = 64 << 10
 
 // Storage implements certmagic.Storage (and therefore certmagic.Locker) by
-// forwarding every operation to a scafo agent's HTTP storage API.
+// forwarding every operation to a scafo node daemon's HTTP storage API.
 //
 // A Storage value is safe for concurrent use; it holds no state beyond its
 // configuration and an *http.Client.
 type Storage struct {
-	// base is the agent's base URL with any trailing slash removed, so that
+	// base is the daemon's base URL with any trailing slash removed, so that
 	// request paths can be appended directly.
 	base string
 
-	// token is the bearer token presented to the agent.
+	// token is the bearer token presented to the daemon.
 	token string
 
 	// client performs the HTTP requests. It is dedicated to this Storage so
@@ -72,7 +72,7 @@ type Storage struct {
 // interface guard
 var _ certmagic.Storage = (*Storage)(nil)
 
-// NewStorage returns a Storage that talks to the scafo agent at endpoint,
+// NewStorage returns a Storage that talks to the scafo node daemon at endpoint,
 // authenticating with the given bearer token.
 //
 // endpoint may include a path prefix (e.g. https://host/scafo); protocol paths
@@ -92,7 +92,7 @@ func NewStorage(endpoint *url.URL, token string) *Storage {
 	}
 }
 
-// CloseIdleConnections drops connections to the agent that are being kept
+// CloseIdleConnections drops connections to the daemon that are being kept
 // alive but are not in use. It is meant for teardown; the Storage remains
 // usable afterwards.
 func (s *Storage) CloseIdleConnections() {
@@ -151,7 +151,7 @@ func (s *Storage) Delete(ctx context.Context, key string) error {
 }
 
 // Exists reports whether key exists, either as a value or as a prefix of other
-// keys ("directory") — certmagic counts both. The agent's stat endpoint
+// keys ("directory") — certmagic counts both. The daemon's stat endpoint
 // answers 200 for both shapes and 404 for neither, so existence is exactly a
 // successful Stat.
 func (s *Storage) Exists(ctx context.Context, key string) bool {
@@ -182,7 +182,7 @@ func (s *Storage) List(ctx context.Context, prefix string, recursive bool) ([]st
 	return keys, nil
 }
 
-// statResponse is the agent's JSON encoding of key metadata. Modified is a
+// statResponse is the daemon's JSON encoding of key metadata. Modified is a
 // pointer so that a null (unknown modification time) is distinguishable from
 // the zero time.
 type statResponse struct {
@@ -193,7 +193,7 @@ type statResponse struct {
 }
 
 // Stat returns metadata about key. If the key does not exist the returned
-// error wraps fs.ErrNotExist. A null modification time from the agent becomes
+// error wraps fs.ErrNotExist. A null modification time from the daemon becomes
 // the zero time.Time, which certmagic treats as "unknown".
 func (s *Storage) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
 	query := url.Values{"key": []string{key}}
@@ -221,12 +221,12 @@ func (s *Storage) Stat(ctx context.Context, key string) (certmagic.KeyInfo, erro
 	return info, nil
 }
 
-// Lock acquires the named distributed lock, blocking until the agent grants it
-// or ctx is done.
+// Lock acquires the named distributed lock, blocking until the daemon grants
+// it or ctx is done.
 //
-// The agent answers 409 while the lock is held elsewhere; Lock then waits
+// The daemon answers 409 while the lock is held elsewhere; Lock then waits
 // LockPollInterval and tries again. Any other failure is returned immediately
-// rather than retried, so a misconfigured or broken agent surfaces as an error
+// rather than retried, so a misconfigured or broken daemon surfaces as an error
 // instead of an endless poll.
 func (s *Storage) Lock(ctx context.Context, name string) error {
 	for {
@@ -253,7 +253,7 @@ func (s *Storage) Lock(ctx context.Context, name string) error {
 	}
 }
 
-// Unlock releases the named lock. The agent treats the release as idempotent,
+// Unlock releases the named lock. The daemon treats the release as idempotent,
 // so it is issued exactly once and a lock that was already gone is not an
 // error.
 func (s *Storage) Unlock(ctx context.Context, name string) error {
@@ -330,14 +330,14 @@ func drainAndClose(resp *http.Response) {
 	_ = resp.Body.Close()
 }
 
-// problemDetails is the application/problem+json body the agent returns for
+// problemDetails is the application/problem+json body the daemon returns for
 // error responses. Only the fields worth surfacing are decoded.
 type problemDetails struct {
 	Title  string `json:"title"`
 	Detail string `json:"detail"`
 }
 
-// apiError reports a non-2xx response from the scafo agent.
+// apiError reports a non-2xx response from the scafo node daemon.
 //
 // A 404 unwraps to fs.ErrNotExist, which is what certmagic checks for with
 // errors.Is to tell "missing" apart from "broken".
@@ -349,8 +349,8 @@ type apiError struct {
 	Detail string
 }
 
-// Error implements the error interface, preferring the agent's problem details
-// over the bare status text when the agent supplied them.
+// Error implements the error interface, preferring the daemon's problem
+// details over the bare status text when the daemon supplied them.
 func (e *apiError) Error() string {
 	reason := e.Title
 	switch {
@@ -378,7 +378,7 @@ func (e *apiError) Unwrap() error {
 }
 
 // newAPIError builds an apiError from a failed response, decoding problem
-// details when the agent provided them. A body that is missing, oversized or
+// details when the daemon provided them. A body that is missing, oversized or
 // malformed is not itself an error: the status code still describes the
 // failure.
 func newAPIError(req *http.Request, resp *http.Response) *apiError {
@@ -414,7 +414,7 @@ func isProblemJSON(contentType string) bool {
 }
 
 // statusCode reports the HTTP status carried by err, or 0 if err did not come
-// from an agent response.
+// from a daemon response.
 func statusCode(err error) int {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {

@@ -23,8 +23,8 @@ func writeTokenFile(t *testing.T, content string) string {
 }
 
 func TestProvisionReadsAndTrimsToken(t *testing.T) {
-	// Agents commonly write the token with a trailing newline.
-	tokenFile := writeTokenFile(t, "  token-from-agent\n")
+	// Node daemons commonly write the token with a trailing newline.
+	tokenFile := writeTokenFile(t, "  token-from-node\n")
 	module := &Module{
 		Endpoint:  "http://127.0.0.1:7400",
 		TokenFile: tokenFile,
@@ -41,8 +41,8 @@ func TestProvisionReadsAndTrimsToken(t *testing.T) {
 	if !ok {
 		t.Fatalf("CertMagicStorage returned %T, want *Storage", storage)
 	}
-	if client.token != "token-from-agent" {
-		t.Errorf("token = %q, want %q", client.token, "token-from-agent")
+	if client.token != "token-from-node" {
+		t.Errorf("token = %q, want %q", client.token, "token-from-node")
 	}
 	if client.base != "http://127.0.0.1:7400" {
 		t.Errorf("base = %q, want %q", client.base, "http://127.0.0.1:7400")
@@ -202,7 +202,7 @@ func TestProvisionExpandsPlaceholders(t *testing.T) {
 
 func TestProvisionExpandsInlineTokenPlaceholder(t *testing.T) {
 	// This is the recommended deployment shape: one environment variable
-	// shared by the agent and by Caddy, named in the config rather than
+	// shared by the daemon and by Caddy, named in the config rather than
 	// pasted into it.
 	t.Setenv("SCAFO_STORAGE_TOKEN", "  token-from-the-environment\n")
 

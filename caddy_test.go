@@ -1,6 +1,7 @@
 package scafo
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,49 @@ func TestProvisionReadsAndTrimsToken(t *testing.T) {
 	}
 }
 
+func TestProvisionTrimsInlineToken(t *testing.T) {
+	// An inline token is trimmed exactly as file content is, so a value pasted
+	// with stray whitespace behaves the same either way.
+	module := &Module{
+		Endpoint: "http://127.0.0.1:7400",
+		Token:    "  token-from-env\n",
+	}
+
+	if err := module.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if module.storage.token != "token-from-env" {
+		t.Errorf("token = %q, want %q", module.storage.token, "token-from-env")
+	}
+	if module.storage.base != "http://127.0.0.1:7400" {
+		t.Errorf("base = %q, want %q", module.storage.base, "http://127.0.0.1:7400")
+	}
+}
+
+func TestProvisionTokenSourcesAgree(t *testing.T) {
+	// Whichever option supplied it, the provisioned client must be identical:
+	// the source of the token is a deployment detail, not a behaviour.
+	inline := &Module{Endpoint: "http://127.0.0.1:7400", Token: "shared-token"}
+	fromFile := &Module{
+		Endpoint:  "http://127.0.0.1:7400",
+		TokenFile: writeTokenFile(t, "shared-token\n"),
+	}
+
+	for _, module := range []*Module{inline, fromFile} {
+		if err := module.Provision(caddy.Context{}); err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+	}
+	if inline.storage.token != fromFile.storage.token {
+		t.Errorf("inline token = %q, token_file token = %q, want them equal",
+			inline.storage.token, fromFile.storage.token)
+	}
+	if inline.storage.base != fromFile.storage.base {
+		t.Errorf("inline base = %q, token_file base = %q, want them equal",
+			inline.storage.base, fromFile.storage.base)
+	}
+}
+
 func TestProvisionTrimsTrailingSlashFromEndpoint(t *testing.T) {
 	module := &Module{
 		Endpoint:  "http://127.0.0.1:7400/",
@@ -84,6 +128,21 @@ func TestProvisionErrors(t *testing.T) {
 			name:    "no token file configured",
 			module:  Module{Endpoint: "http://127.0.0.1:7400"},
 			wantErr: "token_file is required",
+		},
+		{
+			name:    "no token option configured",
+			module:  Module{Endpoint: "http://127.0.0.1:7400"},
+			wantErr: "either token or token_file is required",
+		},
+		{
+			name:    "both token options configured",
+			module:  Module{Endpoint: "http://127.0.0.1:7400", Token: "tok", TokenFile: existing},
+			wantErr: "token and token_file are mutually exclusive",
+		},
+		{
+			name:    "inline token that expands to nothing",
+			module:  Module{Endpoint: "http://127.0.0.1:7400", Token: "{env.SCAFO_TEST_UNSET_TOKEN}"},
+			wantErr: "either token or token_file is required",
 		},
 		{
 			name:    "no endpoint configured",
@@ -141,6 +200,77 @@ func TestProvisionExpandsPlaceholders(t *testing.T) {
 	}
 }
 
+func TestProvisionExpandsInlineTokenPlaceholder(t *testing.T) {
+	// This is the recommended deployment shape: one environment variable
+	// shared by the agent and by Caddy, named in the config rather than
+	// pasted into it.
+	t.Setenv("SCAFO_STORAGE_TOKEN", "  token-from-the-environment\n")
+
+	module := &Module{
+		Endpoint: "http://127.0.0.1:7400",
+		Token:    "{env.SCAFO_STORAGE_TOKEN}",
+	}
+	if err := module.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if module.storage.token != "token-from-the-environment" {
+		t.Errorf("token = %q, want the expanded and trimmed environment value", module.storage.token)
+	}
+}
+
+func TestProvisionFromJSONConfig(t *testing.T) {
+	// A JSON configuration never passes through the Caddyfile parser, so the
+	// struct tags are the whole contract for it.
+	t.Setenv("SCAFO_STORAGE_TOKEN", "json-token")
+
+	const config = `{
+		"module": "scafo",
+		"endpoint": "http://127.0.0.1:7400/prefix",
+		"token": "{env.SCAFO_STORAGE_TOKEN}"
+	}`
+
+	var module Module
+	if err := json.Unmarshal([]byte(config), &module); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if module.Token != "{env.SCAFO_STORAGE_TOKEN}" {
+		t.Errorf("Token = %q, want the unexpanded placeholder", module.Token)
+	}
+	if err := module.Provision(caddy.Context{}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if module.storage.token != "json-token" {
+		t.Errorf("token = %q, want %q", module.storage.token, "json-token")
+	}
+	if module.storage.base != "http://127.0.0.1:7400/prefix" {
+		t.Errorf("base = %q, want the endpoint with its path prefix", module.storage.base)
+	}
+}
+
+func TestJSONConfigRejectsBothTokenOptions(t *testing.T) {
+	const config = `{
+		"endpoint": "http://127.0.0.1:7400",
+		"token": "inline",
+		"token_file": "/var/lib/scafo/storage-token"
+	}`
+
+	var module Module
+	if err := json.Unmarshal([]byte(config), &module); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	err := module.Provision(caddy.Context{})
+	if err == nil {
+		t.Fatal("Provision error = nil, want a mutual-exclusion error")
+	}
+	// The error has to name both options: the operator needs to know which
+	// two lines are fighting, not merely that something is wrong.
+	for _, want := range []string{"token", "token_file", "mutually exclusive"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Provision error = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
 func TestCertMagicStorageBeforeProvision(t *testing.T) {
 	module := &Module{}
 	if _, err := module.CertMagicStorage(); err == nil {
@@ -163,6 +293,7 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 		name          string
 		input         string
 		wantEndpoint  string
+		wantToken     string
 		wantTokenFile string
 		wantErr       string
 	}{
@@ -174,6 +305,52 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 			}`,
 			wantEndpoint:  "http://127.0.0.1:7400",
 			wantTokenFile: "/var/lib/scafo/storage-token",
+		},
+		{
+			name: "inline token",
+			input: `scafo {
+				endpoint http://127.0.0.1:7400
+				token supersecret
+			}`,
+			wantEndpoint: "http://127.0.0.1:7400",
+			wantToken:    "supersecret",
+		},
+		{
+			name: "inline token as an environment placeholder",
+			input: `scafo {
+				endpoint {env.SCAFO_STORAGE_ENDPOINT}
+				token {env.SCAFO_STORAGE_TOKEN}
+			}`,
+			// The parser stores placeholders verbatim; Provision expands them.
+			wantEndpoint: "{env.SCAFO_STORAGE_ENDPOINT}",
+			wantToken:    "{env.SCAFO_STORAGE_TOKEN}",
+		},
+		{
+			// Parsing both is fine -- Provision is where they are rejected --
+			// so the parser must not quietly drop or overwrite either one.
+			name: "both token options parse",
+			input: `scafo {
+				endpoint http://127.0.0.1:7400
+				token supersecret
+				token_file /var/lib/scafo/storage-token
+			}`,
+			wantEndpoint:  "http://127.0.0.1:7400",
+			wantToken:     "supersecret",
+			wantTokenFile: "/var/lib/scafo/storage-token",
+		},
+		{
+			name: "token without an argument",
+			input: `scafo {
+				token
+			}`,
+			wantErr: "wrong argument count",
+		},
+		{
+			name: "token with too many arguments",
+			input: `scafo {
+				token a b
+			}`,
+			wantErr: "wrong argument count",
 		},
 		{
 			name: "empty block",
@@ -226,6 +403,9 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 			}
 			if module.Endpoint != tt.wantEndpoint {
 				t.Errorf("Endpoint = %q, want %q", module.Endpoint, tt.wantEndpoint)
+			}
+			if module.Token != tt.wantToken {
+				t.Errorf("Token = %q, want %q", module.Token, tt.wantToken)
 			}
 			if module.TokenFile != tt.wantTokenFile {
 				t.Errorf("TokenFile = %q, want %q", module.TokenFile, tt.wantTokenFile)

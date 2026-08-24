@@ -20,8 +20,8 @@ func init() {
 // Storage client and hands it to Caddy as the TLS asset store.
 //
 // Caddy never learns the credentials of the underlying bucket: it is given a
-// loopback endpoint and a bearer token file, both provisioned by the scafo
-// agent that owns the bucket.
+// loopback endpoint and a bearer token, both provisioned by the scafo agent
+// that owns the bucket.
 //
 // JSON configuration:
 //
@@ -29,11 +29,21 @@ func init() {
 //	  "storage": {
 //	    "module": "scafo",
 //	    "endpoint": "http://127.0.0.1:7400",
-//	    "token_file": "/var/lib/scafo/storage-token"
+//	    "token": "{env.SCAFO_STORAGE_TOKEN}"
 //	  }
 //	}
 //
 // Caddyfile configuration (a global option):
+//
+//	{
+//	  storage scafo {
+//	    endpoint http://127.0.0.1:7400
+//	    token    {env.SCAFO_STORAGE_TOKEN}
+//	  }
+//	}
+//
+// The token may instead be read from a file, which is the better fit wherever
+// a credential manager hands one over as a path:
 //
 //	{
 //	  storage scafo {
@@ -47,9 +57,15 @@ type Module struct {
 	// Required.
 	Endpoint string `json:"endpoint,omitempty"`
 
+	// Token is the bearer token to present to the agent, given inline. It is
+	// trimmed of surrounding whitespace, exactly as file content is. Exactly
+	// one of Token and TokenFile is required.
+	Token string `json:"token,omitempty"`
+
 	// TokenFile is the path to a file containing the bearer token to present
 	// to the agent. The file is read once during provisioning and its content
-	// is trimmed of surrounding whitespace. Required.
+	// is trimmed of surrounding whitespace. Exactly one of Token and TokenFile
+	// is required.
 	TokenFile string `json:"token_file,omitempty"`
 
 	// storage is the provisioned client handed to certmagic.
@@ -74,11 +90,12 @@ func (Module) CaddyModule() caddy.ModuleInfo {
 }
 
 // Provision expands placeholders in the configuration, validates the endpoint
-// and reads the bearer token.
+// and resolves the bearer token.
 //
-// The token is read here, once, rather than per request: storage is provisioned
-// before Caddy serves anything, so an unreadable or empty token file must fail
-// startup loudly instead of surfacing later as certificate errors.
+// The token is resolved here, once, rather than per request: storage is
+// provisioned before Caddy serves anything, so a missing, unreadable or empty
+// token must fail startup loudly instead of surfacing later as certificate
+// errors.
 func (m *Module) Provision(ctx caddy.Context) error {
 	// Storage is provisioned before the apps that own the request replacer, so
 	// only global placeholders (env vars, system values) are available here.
@@ -106,17 +123,27 @@ func (m *Module) Provision(ctx caddy.Context) error {
 	parsed.Fragment = ""
 	parsed.User = nil
 
+	// The two token sources converge on one string here, so nothing downstream
+	// can tell -- or needs to tell -- where the credential came from. They are
+	// mutually exclusive rather than ordered by precedence: a deployment that
+	// sets both has a mistake in it, and silently preferring one would hide
+	// which token is actually in use.
+	token := strings.TrimSpace(repl.ReplaceKnown(m.Token, ""))
 	tokenFile := strings.TrimSpace(repl.ReplaceKnown(m.TokenFile, ""))
-	if tokenFile == "" {
-		return errors.New("scafo storage: token_file is required")
-	}
-	raw, err := os.ReadFile(tokenFile)
-	if err != nil {
-		return fmt.Errorf("scafo storage: reading token_file: %v", err)
-	}
-	token := strings.TrimSpace(string(raw))
-	if token == "" {
-		return fmt.Errorf("scafo storage: token_file %s is empty", tokenFile)
+	switch {
+	case token != "" && tokenFile != "":
+		return errors.New("scafo storage: token and token_file are mutually exclusive; set exactly one")
+	case token == "" && tokenFile == "":
+		return errors.New("scafo storage: either token or token_file is required")
+	case tokenFile != "":
+		raw, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return fmt.Errorf("scafo storage: reading token_file: %v", err)
+		}
+		token = strings.TrimSpace(string(raw))
+		if token == "" {
+			return fmt.Errorf("scafo storage: token_file %s is empty", tokenFile)
+		}
 	}
 
 	m.storage = NewStorage(parsed, token)
@@ -135,11 +162,13 @@ func (m *Module) CertMagicStorage() (certmagic.Storage, error) {
 //
 //	storage scafo {
 //	    endpoint   <url>
+//	    token      <token>
 //	    token_file <path>
 //	}
 //
-// Required options are validated in Provision rather than here, because a JSON
-// configuration never passes through this parser.
+// Required options, and the fact that token and token_file exclude each other,
+// are validated in Provision rather than here, because a JSON configuration
+// never passes through this parser.
 func (m *Module) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	// The dispenser is positioned before the module name token ("scafo"), so
 	// step onto it before reading the block.
@@ -157,6 +186,11 @@ func (m *Module) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			m.Endpoint = d.Val()
+		case "token":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			m.Token = d.Val()
 		case "token_file":
 			if !d.NextArg() {
 				return d.ArgErr()

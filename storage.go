@@ -6,8 +6,8 @@
 // this package holds nothing but a loopback endpoint URL and a bearer token, so
 // a compromised TLS terminator cannot reach the bucket directly.
 //
-// The wire contract is the scafo storage protocol version 1; see the README for
-// the full endpoint table.
+// The wire contract is the scafo storage protocol version 1; see PROTOCOL.md
+// for the full endpoint table.
 package scafo
 
 import (

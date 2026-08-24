@@ -4,3 +4,5 @@
 Dockerfile
 .dockerignore
 README.md
+PROTOCOL.md
+CONTRIBUTING.md

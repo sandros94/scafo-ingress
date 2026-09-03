@@ -62,11 +62,13 @@
 		lb_retries      2
 		lb_try_duration 5s
 
-		# Passive health checking: an upstream that fails three times is
-		# skipped for thirty seconds, which is what makes "the rest" above
-		# mean anything.
+		# Passive health checking: an upstream that fails once is skipped for
+		# thirty seconds, which is what makes "the rest" above mean anything.
+		# Exactly once, because `first` keeps choosing an upstream until it
+		# is marked down, and a higher max_fails would spend every retry of
+		# one request on the same dead process.
 		fail_duration 30s
-		max_fails     3
+		max_fails     1
 	}
 
 	handle_errors {

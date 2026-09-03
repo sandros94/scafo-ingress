@@ -278,13 +278,19 @@ reverse_proxy {
 	lb_try_duration 5s
 
 	fail_duration 30s
-	max_fails     3
+	max_fails     1
 }
 ```
 
 `fail_duration` and `max_fails` are Caddy's passive health checks: an upstream
 that fails `max_fails` times inside `fail_duration` is skipped while that window
 lasts, so `first` moves down the list instead of hammering a dead process.
+`max_fails` must stay at 1 here, and the reason is `first` itself: it picks the
+first upstream that is not yet marked down, and a failed dial does not mark one
+down until it has failed `max_fails` times — so with a higher value every retry
+of the same request goes back to the same dead process, and the request fails
+before the mark is ever set. One failure is enough evidence to move on, and
+`fail_duration` is what lets the process back in once it is up again.
 `lb_retries` and `lb_try_duration` bound how long one request keeps trying
 before it gives up — Caddy stops at whichever of the two it reaches first, and
 waits `lb_try_interval` between attempts (250ms by default, but only when

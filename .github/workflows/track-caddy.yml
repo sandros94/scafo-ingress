@@ -52,7 +52,7 @@ jobs:
       image-tags: ${{ steps.release.outputs.image-tags }}
       dns-image-tags: ${{ steps.release.outputs.dns-image-tags }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The next module version is computed from the existing release tags,
           # which a shallow clone does not carry.

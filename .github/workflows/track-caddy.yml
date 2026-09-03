@@ -5,7 +5,7 @@ name: track-caddy
 # Once a day: read the canonical pin (the Dockerfile's ARG default) and
 # caddyserver/caddy's latest stable release, and if they differ, move both the
 # pin and go.mod onto it, verify the result, push it to main, cut the next
-# PATCH release of this module, and publish that release's images and binaries
+# PATCH release of this repository, and publish that release's images and binaries
 # -- all inside this one run.
 #
 # It has to be one run. Events created with the default GITHUB_TOKEN do not
@@ -86,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           # Both halves move together, from the same value: go.mod decides what
-          # the module compiles against, the Dockerfile ARG decides what the
+          # the modules compile against, the Dockerfile ARG decides what the
           # image and the binaries are built with.
           go get "github.com/caddyserver/caddy/v2@${LATEST}"
           go mod tidy
@@ -134,10 +134,10 @@ jobs:
           sha="$(git rev-parse HEAD)"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-          # The module's own semver: the tracker may only add one to the patch.
-          # An empty result means this module has never been released, and the
-          # first release is a human's call -- so the commit still gets images,
-          # it just does not get a release.
+          # This repository's own semver: the tracker may only add one to the
+          # patch. An empty result means nothing here has been released yet,
+          # and the first release is a human's call -- so the commit still gets
+          # images, it just does not get a release.
           next="$(git tag --list | .github/scripts/next-version.sh)"
           echo "release-tag=$next" >> "$GITHUB_OUTPUT"
 

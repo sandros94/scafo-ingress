@@ -1,17 +1,22 @@
-# scafo-certmagic
+# scafo-ingress
 
-A Caddy TLS storage module that keeps certificates, private keys and ACME
-account data in a bucket **without giving Caddy the bucket credentials**.
+The Caddy modules scafo relies on, in one repository and one binary.
 
-It implements CertMagic's `Storage` interface (including its `Locker`) by
-turning every storage operation into an HTTP call to a colocated *scafo node
-daemon*. The daemon owns the bucket connection; Caddy owns nothing but a
-loopback URL and a bearer token.
+`caddy.storage.scafo` is a TLS storage module that keeps certificates, private
+keys and ACME account data in a bucket **without giving Caddy the bucket
+credentials**. It implements CertMagic's `Storage` interface (including its
+`Locker`) by turning every storage operation into an HTTP call to a colocated
+*scafo node daemon*. The daemon owns the bucket connection; Caddy owns nothing
+but a loopback URL and a bearer token.
 
-- Module path: `github.com/sandros94/scafo-certmagic`
+`http.reverse_proxy.upstreams.scafo` resolves a route's backends from that same
+daemon, so Caddy proxies to what the node is actually running — *coming with the
+next release; unreleased and undocumented here until it ships.*
+
+- Module path: `github.com/sandros94/scafo-ingress`
 - Caddy module ID: `caddy.storage.scafo`
 - Wire contract: [Protocol v1](PROTOCOL.md) · Maintenance: [CONTRIBUTING.md](CONTRIBUTING.md)
-- License: Apache-2.0
+- License: MIT
 
 ## The trust model
 
@@ -28,8 +33,12 @@ configuration values, neither of which is a cloud secret.
 ## Install
 
 ```sh
-xcaddy build --with github.com/sandros94/scafo-certmagic
+xcaddy build --with github.com/sandros94/scafo-ingress          # every module here
+xcaddy build --with github.com/sandros94/scafo-ingress/storage  # only the storage one
 ```
+
+The repository root imports every module in it, so naming the root compiles them
+all in; naming a single module compiles that one and nothing else.
 
 Or use the provided `Dockerfile`, which does the same inside the official
 `caddy:<version>-builder` image and copies the result into the matching runtime

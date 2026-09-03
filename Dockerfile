@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Builds a Caddy image with the scafo storage module compiled in.
+# Builds a Caddy image with the scafo modules compiled in.
 #
 # CADDY_VERSION selects both the xcaddy builder and the runtime base, so the
 # two never drift apart. Override it (--build-arg CADDY_VERSION=2.10.0) to
@@ -16,13 +16,15 @@ ARG CADDY_VERSION=2.11.4
 
 FROM caddy:${CADDY_VERSION}-builder AS builder
 
-# The module is compiled from this build context rather than fetched from the
+# The modules are compiled from this build context rather than fetched from the
 # module proxy, so the image always matches the tree it was built from.
 COPY . /src
 
-# The builder image pins the Caddy version through its own CADDY_VERSION
-# environment variable, so xcaddy needs no version argument here.
-RUN xcaddy build --with github.com/sandros94/scafo-certmagic=/src
+# The repository root imports every module in it, so naming the root here is
+# what compiles them all in. The builder image pins the Caddy version through
+# its own CADDY_VERSION environment variable, so xcaddy needs no version
+# argument.
+RUN xcaddy build --with github.com/sandros94/scafo-ingress=/src
 
 FROM caddy:${CADDY_VERSION}
 

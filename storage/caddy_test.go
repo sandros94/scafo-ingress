@@ -1,4 +1,4 @@
-package scafo
+package storage
 
 import (
 	"encoding/json"
@@ -9,6 +9,8 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+
+	"github.com/sandros94/scafo-ingress/internal/nodeapi"
 )
 
 // writeTokenFile creates a token file in a temporary directory and returns its
@@ -25,10 +27,10 @@ func writeTokenFile(t *testing.T, content string) string {
 func TestProvisionReadsAndTrimsToken(t *testing.T) {
 	// Node daemons commonly write the token with a trailing newline.
 	tokenFile := writeTokenFile(t, "  token-from-node\n")
-	module := &Module{
+	module := &Module{Config: nodeapi.Config{
 		Endpoint:  "http://127.0.0.1:7400",
 		TokenFile: tokenFile,
-	}
+	}}
 
 	if err := module.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -52,10 +54,10 @@ func TestProvisionReadsAndTrimsToken(t *testing.T) {
 func TestProvisionTrimsInlineToken(t *testing.T) {
 	// An inline token is trimmed exactly as file content is, so a value pasted
 	// with stray whitespace behaves the same either way.
-	module := &Module{
+	module := &Module{Config: nodeapi.Config{
 		Endpoint: "http://127.0.0.1:7400",
 		Token:    "  token-from-env\n",
-	}
+	}}
 
 	if err := module.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -71,11 +73,11 @@ func TestProvisionTrimsInlineToken(t *testing.T) {
 func TestProvisionTokenSourcesAgree(t *testing.T) {
 	// Whichever option supplied it, the provisioned client must be identical:
 	// the source of the token is a deployment detail, not a behaviour.
-	inline := &Module{Endpoint: "http://127.0.0.1:7400", Token: "shared-token"}
-	fromFile := &Module{
+	inline := &Module{Config: nodeapi.Config{Endpoint: "http://127.0.0.1:7400", Token: "shared-token"}}
+	fromFile := &Module{Config: nodeapi.Config{
 		Endpoint:  "http://127.0.0.1:7400",
 		TokenFile: writeTokenFile(t, "shared-token\n"),
-	}
+	}}
 
 	for _, module := range []*Module{inline, fromFile} {
 		if err := module.Provision(caddy.Context{}); err != nil {
@@ -93,10 +95,10 @@ func TestProvisionTokenSourcesAgree(t *testing.T) {
 }
 
 func TestProvisionTrimsTrailingSlashFromEndpoint(t *testing.T) {
-	module := &Module{
+	module := &Module{Config: nodeapi.Config{
 		Endpoint:  "http://127.0.0.1:7400/",
 		TokenFile: writeTokenFile(t, "tok"),
-	}
+	}}
 	if err := module.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -116,52 +118,52 @@ func TestProvisionErrors(t *testing.T) {
 	}{
 		{
 			name:    "missing token file",
-			module:  Module{Endpoint: "http://127.0.0.1:7400", TokenFile: missing},
+			module:  Module{Config: nodeapi.Config{Endpoint: "http://127.0.0.1:7400", TokenFile: missing}},
 			wantErr: "reading token_file",
 		},
 		{
 			name:    "empty token file",
-			module:  Module{Endpoint: "http://127.0.0.1:7400", TokenFile: writeTokenFile(t, "\n \n")},
+			module:  Module{Config: nodeapi.Config{Endpoint: "http://127.0.0.1:7400", TokenFile: writeTokenFile(t, "\n \n")}},
 			wantErr: "is empty",
 		},
 		{
 			name:    "no token file configured",
-			module:  Module{Endpoint: "http://127.0.0.1:7400"},
+			module:  Module{Config: nodeapi.Config{Endpoint: "http://127.0.0.1:7400"}},
 			wantErr: "token_file is required",
 		},
 		{
 			name:    "no token option configured",
-			module:  Module{Endpoint: "http://127.0.0.1:7400"},
+			module:  Module{Config: nodeapi.Config{Endpoint: "http://127.0.0.1:7400"}},
 			wantErr: "either token or token_file is required",
 		},
 		{
 			name:    "both token options configured",
-			module:  Module{Endpoint: "http://127.0.0.1:7400", Token: "tok", TokenFile: existing},
+			module:  Module{Config: nodeapi.Config{Endpoint: "http://127.0.0.1:7400", Token: "tok", TokenFile: existing}},
 			wantErr: "token and token_file are mutually exclusive",
 		},
 		{
 			name:    "inline token that expands to nothing",
-			module:  Module{Endpoint: "http://127.0.0.1:7400", Token: "{env.SCAFO_TEST_UNSET_TOKEN}"},
+			module:  Module{Config: nodeapi.Config{Endpoint: "http://127.0.0.1:7400", Token: "{env.SCAFO_TEST_UNSET_TOKEN}"}},
 			wantErr: "either token or token_file is required",
 		},
 		{
 			name:    "no endpoint configured",
-			module:  Module{TokenFile: existing},
+			module:  Module{Config: nodeapi.Config{TokenFile: existing}},
 			wantErr: "endpoint is required",
 		},
 		{
 			name:    "unparseable endpoint",
-			module:  Module{Endpoint: "127.0.0.1:7400", TokenFile: existing},
+			module:  Module{Config: nodeapi.Config{Endpoint: "127.0.0.1:7400", TokenFile: existing}},
 			wantErr: "invalid endpoint",
 		},
 		{
 			name:    "endpoint with a non-http scheme",
-			module:  Module{Endpoint: "unix:///run/scafo.sock", TokenFile: existing},
+			module:  Module{Config: nodeapi.Config{Endpoint: "unix:///run/scafo.sock", TokenFile: existing}},
 			wantErr: "must use the http or https scheme",
 		},
 		{
 			name:    "endpoint without host",
-			module:  Module{Endpoint: "http:///v1", TokenFile: existing},
+			module:  Module{Config: nodeapi.Config{Endpoint: "http:///v1", TokenFile: existing}},
 			wantErr: "has no host",
 		},
 	}
@@ -185,10 +187,10 @@ func TestProvisionExpandsPlaceholders(t *testing.T) {
 	t.Setenv("SCAFO_TEST_ENDPOINT", "http://127.0.0.1:9999")
 	t.Setenv("SCAFO_TEST_TOKEN_FILE", tokenFile)
 
-	module := &Module{
+	module := &Module{Config: nodeapi.Config{
 		Endpoint:  "{env.SCAFO_TEST_ENDPOINT}",
 		TokenFile: "{env.SCAFO_TEST_TOKEN_FILE}",
-	}
+	}}
 	if err := module.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -206,10 +208,10 @@ func TestProvisionExpandsInlineTokenPlaceholder(t *testing.T) {
 	// pasted into it.
 	t.Setenv("SCAFO_STORAGE_TOKEN", "  token-from-the-environment\n")
 
-	module := &Module{
+	module := &Module{Config: nodeapi.Config{
 		Endpoint: "http://127.0.0.1:7400",
 		Token:    "{env.SCAFO_STORAGE_TOKEN}",
-	}
+	}}
 	if err := module.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}

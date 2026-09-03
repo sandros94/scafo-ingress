@@ -1,9 +1,9 @@
 # scafo storage protocol v1
 
 This is the canonical description of the wire contract between
-[scafo-certmagic](README.md) and a scafo node daemon. It is normative: a daemon
-that satisfies everything below is a correct peer for this module, and this
-module sends nothing beyond it.
+[scafo-ingress](README.md)'s `caddy.storage.scafo` module and a scafo node
+daemon. It is normative: a daemon that satisfies everything below is a correct
+peer for this module, and this module sends nothing beyond it.
 
 The base URL is the module's configured `endpoint`. A path prefix on that URL is
 preserved, so every path below is appended to it.

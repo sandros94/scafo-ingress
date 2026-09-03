@@ -186,7 +186,7 @@ jobs:
       # Provenance lives in GitHub's attestation store (Sigstore-backed) rather
       # than inside the manifest list, and covers the multi-platform list the
       # tags point at. Verify with:
-      #   gh attestation verify oci://ghcr.io/sandros94/scafo-caddy:edge -R sandros94/scafo-certmagic
+      #   gh attestation verify oci://ghcr.io/sandros94/scafo-caddy:edge -R sandros94/scafo-ingress
       #
       # The store refuses user-owned PRIVATE repositories ("make this repository
       # public"), so the step arms itself on visibility rather than failing on
@@ -199,7 +199,7 @@ jobs:
           subject-digest: ${{ steps.inspect.outputs.digest }}
 
   binaries:
-    # Plain binaries for people who want the module without the image. Built on
+    # Plain binaries for people who want the modules without the image. Built on
     # a runner of the target architecture for the same reason the images are.
     name: binary ${{ matrix.platform }}
     if: inputs.release-tag != ''
@@ -229,7 +229,7 @@ jobs:
           # The binary is lifted out of the Dockerfile's builder stage rather
           # than rebuilt by a second, hand-written xcaddy invocation. That stage
           # already runs
-          #     xcaddy build --with github.com/sandros94/scafo-certmagic=/src
+          #     xcaddy build --with github.com/sandros94/scafo-ingress=/src
           # inside caddy:<pin>-builder, against the source checked out here and
           # never against the module proxy, so the asset is the same binary that
           # is inside the image published from this very run -- and there is one
@@ -245,7 +245,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          # Cheap proof that the asset is a working Caddy with this module
+          # Cheap proof that the asset is a working Caddy with these modules
           # compiled in, rather than an upstream binary that happened to build.
           "./scafo-caddy-linux-${ARCH}" version
           "./scafo-caddy-linux-${ARCH}" list-modules | grep -qxF 'caddy.storage.scafo'

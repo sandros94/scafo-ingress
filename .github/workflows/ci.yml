@@ -47,7 +47,7 @@ jobs:
         run: go test -race ./...
 
   smoke:
-    # Compiling the module inside xcaddy against a real Caddy tree is the only
+    # Compiling the modules inside xcaddy against a real Caddy tree is the only
     # check that catches interface drift in Caddy or certmagic. Pull requests
     # do not publish, so a single native amd64 build is enough signal here; the
     # per-architecture builds happen on the publishing path below.

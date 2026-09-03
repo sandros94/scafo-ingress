@@ -1,4 +1,4 @@
-package scafo
+package storage
 
 import (
 	"context"

@@ -5,7 +5,7 @@
 *.so
 *.dylib
 /caddy
-/scafo-certmagic
+/scafo-ingress
 
 # Test and coverage output
 *.test

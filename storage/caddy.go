@@ -1,15 +1,13 @@
-package scafo
+package storage
 
 import (
 	"errors"
-	"fmt"
-	"net/url"
-	"os"
-	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/certmagic"
+
+	"github.com/sandros94/scafo-ingress/internal/nodeapi"
 )
 
 func init() {
@@ -52,21 +50,10 @@ func init() {
 //	  }
 //	}
 type Module struct {
-	// Endpoint is the base URL of the scafo node daemon's storage API, for
-	// example http://127.0.0.1:7400. A path prefix is allowed and is preserved.
-	// Required.
-	Endpoint string `json:"endpoint,omitempty"`
-
-	// Token is the bearer token to present to the daemon, given inline. It is
-	// trimmed of surrounding whitespace, exactly as file content is. Exactly
-	// one of Token and TokenFile is required.
-	Token string `json:"token,omitempty"`
-
-	// TokenFile is the path to a file containing the bearer token to present
-	// to the daemon. The file is read once during provisioning and its content
-	// is trimmed of surrounding whitespace. Exactly one of Token and TokenFile
-	// is required.
-	TokenFile string `json:"token_file,omitempty"`
+	// Config carries the endpoint and token options that every scafo module
+	// takes. It is embedded, so they remain top-level members of this module's
+	// JSON and mean here exactly what they mean in the others.
+	nodeapi.Config
 
 	// storage is the provisioned client handed to certmagic.
 	storage *Storage
@@ -97,56 +84,11 @@ func (Module) CaddyModule() caddy.ModuleInfo {
 // token must fail startup loudly instead of surfacing later as certificate
 // errors.
 func (m *Module) Provision(ctx caddy.Context) error {
-	// Storage is provisioned before the apps that own the request replacer, so
-	// only global placeholders (env vars, system values) are available here.
-	// ReplaceKnown, rather than ReplaceAll, leaves unrecognized braces alone
-	// instead of silently blanking part of a path or URL.
-	repl := caddy.NewReplacer()
-
-	endpoint := strings.TrimSpace(repl.ReplaceKnown(m.Endpoint, ""))
-	if endpoint == "" {
-		return errors.New("scafo storage: endpoint is required")
-	}
-	parsed, err := url.Parse(endpoint)
+	endpoint, token, err := m.Config.Resolve(errPrefix)
 	if err != nil {
-		return fmt.Errorf("scafo storage: invalid endpoint %q: %v", endpoint, err)
+		return err
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("scafo storage: endpoint %q must use the http or https scheme", endpoint)
-	}
-	if parsed.Host == "" {
-		return fmt.Errorf("scafo storage: endpoint %q has no host", endpoint)
-	}
-	// Only the origin and any path prefix are meaningful; the rest would be
-	// silently dropped when protocol paths are appended.
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	parsed.User = nil
-
-	// The two token sources converge on one string here, so nothing downstream
-	// can tell -- or needs to tell -- where the credential came from. They are
-	// mutually exclusive rather than ordered by precedence: a deployment that
-	// sets both has a mistake in it, and silently preferring one would hide
-	// which token is actually in use.
-	token := strings.TrimSpace(repl.ReplaceKnown(m.Token, ""))
-	tokenFile := strings.TrimSpace(repl.ReplaceKnown(m.TokenFile, ""))
-	switch {
-	case token != "" && tokenFile != "":
-		return errors.New("scafo storage: token and token_file are mutually exclusive; set exactly one")
-	case token == "" && tokenFile == "":
-		return errors.New("scafo storage: either token or token_file is required")
-	case tokenFile != "":
-		raw, err := os.ReadFile(tokenFile)
-		if err != nil {
-			return fmt.Errorf("scafo storage: reading token_file: %v", err)
-		}
-		token = strings.TrimSpace(string(raw))
-		if token == "" {
-			return fmt.Errorf("scafo storage: token_file %s is empty", tokenFile)
-		}
-	}
-
-	m.storage = NewStorage(parsed, token)
+	m.storage = NewStorage(endpoint, token)
 	return nil
 }
 
@@ -166,6 +108,9 @@ func (m *Module) CertMagicStorage() (certmagic.Storage, error) {
 //	    token_file <path>
 //	}
 //
+// Every option in the block is a connection option, so each one is handed to
+// the shared parser; this module adds none of its own.
+//
 // Required options, and the fact that token and token_file exclude each other,
 // are validated in Provision rather than here, because a JSON configuration
 // never passes through this parser.
@@ -180,27 +125,12 @@ func (m *Module) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		return d.ArgErr()
 	}
 	for d.NextBlock(0) {
-		switch d.Val() {
-		case "endpoint":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			m.Endpoint = d.Val()
-		case "token":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			m.Token = d.Val()
-		case "token_file":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			m.TokenFile = d.Val()
-		default:
-			return d.Errf("unrecognized scafo storage option '%s'", d.Val())
+		handled, err := m.Config.ParseCaddyfileOption(d)
+		if err != nil {
+			return err
 		}
-		if d.NextArg() {
-			return d.ArgErr()
+		if !handled {
+			return d.Errf("unrecognized scafo storage option '%s'", d.Val())
 		}
 	}
 	return nil

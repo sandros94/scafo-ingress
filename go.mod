@@ -1,4 +1,4 @@
-module github.com/sandros94/scafo-certmagic
+module github.com/sandros94/scafo-ingress
 
 go 1.25.1
 

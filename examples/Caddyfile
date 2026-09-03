@@ -1,0 +1,118 @@
+# A complete scafo ingress, using both modules in this repository.
+#
+# It expects a scafo node daemon on loopback at 127.0.0.1:7400 and one shared
+# environment variable, SCAFO_STORAGE_TOKEN. Replace dev.example with your
+# platform domain and the DNS provider with yours; everything else is meant to
+# be usable as it stands.
+#
+# See README.md for what each piece is for, and PROTOCOL.md for the contract
+# with the daemon.
+
+{
+	# Certificates, keys and ACME account data live in the bucket the node
+	# daemon owns. Caddy never sees the bucket credentials.
+	storage scafo {
+		endpoint http://127.0.0.1:7400
+		token    {env.SCAFO_STORAGE_TOKEN}
+	}
+
+	# The daemon decides which customer domains it will issue for. This
+	# endpoint is public-facing input to a private decision, so it is the one
+	# scafo path Caddy calls without a token.
+	on_demand_tls {
+		ask http://127.0.0.1:7400/v1/ingress/ask
+	}
+}
+
+# Everything both site blocks share: where a request goes, and what happens
+# when it goes nowhere.
+(scafo) {
+	reverse_proxy {
+		# Where this request goes is the daemon's answer, polled in the
+		# background and cached, not a backend address written down here.
+		dynamic scafo {
+			endpoint http://127.0.0.1:7400
+			token    {env.SCAFO_STORAGE_TOKEN}
+
+			# Put this node's own upstreams first, so a request that
+			# arrives here stays here whenever it can. Name another
+			# node's id to prefer that one instead, or `none` to take
+			# the fleet's own order.
+			prefer        self
+			poll_interval 5s
+		}
+
+		# The daemon's order is a priority, not a weighting, so take it at
+		# its word: first is the head of the list, and the rest are reached
+		# for only when the head fails.
+		#
+		# Caddy stops retrying at whichever of lb_retries and
+		# lb_try_duration it reaches first, waiting lb_try_interval
+		# (250ms) in between -- so this budget is two attempts and about
+		# half a second. A request to a host the fleet does not serve
+		# spends the same budget before it can be answered as a 404
+		# below, and retrying an empty answer never changes it, so keep
+		# the retry count low.
+		lb_policy       first
+		lb_retries      2
+		lb_try_duration 5s
+
+		# Passive health checking: an upstream that fails three times is
+		# skipped for thirty seconds, which is what makes "the rest" above
+		# mean anything.
+		fail_duration 30s
+		max_fails     3
+	}
+
+	handle_errors {
+		# The module cannot choose a status code -- returning no upstreams is
+		# a 503 in Caddy's vocabulary -- so it records why instead, and this
+		# is where that becomes an answer. `unknown` is a host the fleet does
+		# not serve; `denied` is a fleet API path that must never be proxied,
+		# and is answered the same way so as not to confirm it exists.
+		@missing vars scafo.route unknown denied
+		handle @missing {
+			respond <<HTML
+				<!DOCTYPE html>
+				<html lang="en">
+				<head><meta charset="utf-8"><title>Not found</title></head>
+				<body style="font: 16px/1.6 system-ui, sans-serif; max-width: 32rem; margin: 12vh auto; padding: 0 1.5rem">
+				<h1 style="font-size: 1.25rem">Nothing is served here</h1>
+				<p>No deployment answers to <code>{http.vars.scafo.host}</code>.</p>
+				<p style="color: #666">scafo</p>
+				</body>
+				</html>
+				HTML 404
+		}
+
+		# Everything else keeps the status it had: `ok` with every upstream
+		# down, `unavailable` while the daemon has not answered yet, and any
+		# other handler error on the way through.
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
+}
+
+# The platform domain and every deployment under it, on one wildcard
+# certificate. DNS-01 is the suggested default: it needs no inbound request per
+# name, so a deployment is reachable the moment the daemon routes it.
+#
+# Without DNS credentials, drop the tls block and Caddy issues per name over
+# HTTP-01 instead -- correct, but each new subdomain then waits for its own
+# issuance.
+*.dev.example, dev.example {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+		resolvers 1.1.1.1
+	}
+	import scafo
+}
+
+# Customer domains pointed at this fleet. Every other name reaching the HTTPS
+# port lands here, and the daemon's ask endpoint decides whether it gets a
+# certificate at all.
+https:// {
+	tls {
+		on_demand
+	}
+	import scafo
+}

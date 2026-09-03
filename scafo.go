@@ -19,10 +19,8 @@
 package scafoingress
 
 import (
+	// Registers http.reverse_proxy.upstreams.scafo.
+	_ "github.com/sandros94/scafo-ingress/ingress"
 	// Registers caddy.storage.scafo.
 	_ "github.com/sandros94/scafo-ingress/storage"
-	// TODO: uncomment once the ingress module lands, so that building the root
-	// keeps meaning "every module in this repository".
-	// Registers http.reverse_proxy.upstreams.scafo.
-	// _ "github.com/sandros94/scafo-ingress/ingress"
 )

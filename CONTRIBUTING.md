@@ -11,12 +11,22 @@ One Go module, one Caddy binary, a package per Caddy module:
 | --- | --- |
 | `scafo.go` | the repository root, which imports every module below so that naming the root in `xcaddy build` compiles them all |
 | `storage/` | `caddy.storage.scafo`, the certmagic storage client |
-| `ingress/` | `http.reverse_proxy.upstreams.scafo` — not written yet |
+| `ingress/` | `http.reverse_proxy.upstreams.scafo`, the routing-document poller and the dynamic upstreams source over it |
 | `internal/nodeapi/` | what every module needs to reach the node daemon: the `endpoint`/`token`/`token_file` options and their resolution, and the daemon's problem+json errors |
+| `examples/` | a Caddyfile using both modules together, kept working by hand rather than by CI |
 
 `internal/nodeapi` holds what is shared *because* the daemon is shared, and
 nothing else. A module's own paths, headers and protocol version belong to that
 module, even when a second one ends up wanting something similar.
+
+Each module package is split the same way: the client and its types in a file
+named after the package, the Caddy module — registration, options, provisioning,
+Caddyfile — in `caddy.go`.
+
+`go.mod` is long out of proportion to this repository, and `ingress/` is why:
+`modules/caddyhttp/reverseproxy` is not importable without `caddyhttp`, which
+pulls in Caddy's own dependency tree. Nothing here uses any of it directly, and
+the linker drops what a given build does not reach.
 
 ## Development
 

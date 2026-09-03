@@ -149,7 +149,7 @@ jobs:
           touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Keyed by flavour as well as platform, so the merge job's glob picks
           # up the two halves of one manifest list and not all four digests.
@@ -357,7 +357,7 @@ jobs:
           sha256sum "$ASSET" > "${ASSET}.sha256"
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.flavor }}-${{ matrix.arch }}
           path: ${{ env.ASSET }}*

@@ -213,6 +213,11 @@ Until a first document arrives there is nothing to route with, and the module
 says so distinctly rather than reporting every host as unknown; see
 [Unroutable requests](README.md#unroutable-requests).
 
+A daemon answers `503` with `urn:scafo:draining` until its first reconcile pass
+has completed: an empty document would read as every route withdrawn, where a
+failed fetch is a pause that keeps the last document answering. Treat it as any
+other failure, never as an empty document.
+
 ## Errors
 
 Non-2xx responses use `application/problem+json`. The `title` and `detail`

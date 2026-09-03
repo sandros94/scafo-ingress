@@ -65,24 +65,76 @@ docker build -t my-caddy .
 docker build -t my-caddy --build-arg CADDY_VERSION=2.10.0 .
 ```
 
-Prebuilt images and binaries are published for `linux/amd64` and `linux/arm64`.
-Every release carries `scafo-caddy-linux-{amd64,arm64}` with a `.sha256`
-alongside each — the same binaries that are inside the image — and a
-`caddy-version` file naming the Caddy release they embed.
+Prebuilt images and binaries are published for `linux/amd64` and `linux/arm64`,
+in two flavours.
+
+### Two flavours
+
+**Lean** is Caddy with only the two modules above. **`-dns`** is the same build
+with a curated set of DNS-01 provider plugins compiled in, for the wildcard
+certificate described [below](#a-complete-caddyfile) — the ACME DNS challenge
+needs a plugin for the zone's provider, and a Caddy plugin can only arrive at
+compile time.
+
+| | Image | Release binaries |
+| --- | --- | --- |
+| Lean | `:latest`, `:X.Y.Z`, `:edge` | `scafo-caddy-linux-{amd64,arm64}` |
+| With providers | `:latest-dns`, `:X.Y.Z-dns`, `:edge-dns` | `scafo-caddy-dns-linux-{amd64,arm64}` |
+
+Each binary ships a `.sha256` alongside it and is the same binary that is inside
+the image of its flavour, lifted out of that build's builder stage. Every
+release also carries one `caddy-version` file naming the Caddy both flavours
+embed.
 
 ```sh
-docker pull ghcr.io/sandros94/scafo-caddy:latest
-caddy list-modules | grep scafo
+docker pull ghcr.io/sandros94/scafo-caddy:latest-dns
+caddy list-modules | grep -E 'scafo|dns.providers'
 # caddy.storage.scafo
+# dns.providers.bunny
+# dns.providers.cloudflare
+# dns.providers.digitalocean
+# dns.providers.hetzner
+# dns.providers.ovh
+# dns.providers.route53
 # http.reverse_proxy.upstreams.scafo
 ```
 
-Neither published artifact carries a DNS provider plugin, and the DNS-01
-challenge needs one. A fleet that wants the wildcard certificate described
-[below](#a-complete-caddyfile) builds its own image or binary with the provider
-added — `xcaddy build --with github.com/sandros94/scafo-ingress --with
-github.com/caddy-dns/cloudflare` — or stays on HTTP-01, which needs nothing
-extra.
+The providers are Bunny, Cloudflare, DigitalOcean, Hetzner, OVH and Route 53 —
+the [caddy-dns](https://github.com/caddy-dns) module for each, pinned to an
+exact version in [`dns-providers.txt`](dns-providers.txt). That file is the
+whole list, and moving a pin is a reviewable commit; see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+**Take the lean flavour unless you need DNS-01.** HTTP-01 needs no plugin, and
+neither does the on-demand TLS that covers customer domains. The providers exist
+for the wildcard.
+
+### A provider that is not in the list
+
+The build takes any Go module the same way the curated ones arrive. With
+`xcaddy` directly:
+
+```sh
+xcaddy build \
+  --with github.com/sandros94/scafo-ingress \
+  --with github.com/caddy-dns/gandi@v1.0.3
+```
+
+Or through this repository's `Dockerfile`, whose `DNS_PROVIDERS` build argument
+takes a whitespace-separated list of pinned module paths and is exactly what the
+publishing workflow passes:
+
+```sh
+# one provider of your own, and nothing else
+docker build -t my-caddy --build-arg DNS_PROVIDERS=github.com/caddy-dns/gandi@v1.0.3 .
+
+# the curated set, reproducing the published -dns image
+docker build -t my-caddy --build-arg DNS_PROVIDERS="$(.github/scripts/dns-providers.sh)" .
+```
+
+One Dockerfile and one xcaddy invocation stand behind both published flavours,
+so a custom build is the published build with a different argument rather than a
+recipe of its own.
 
 ## Connecting to the daemon
 
@@ -344,11 +396,11 @@ https:// {
 **The wildcard is the suggested default for the platform domain.** DNS-01 needs
 no inbound request per name, so a new deployment is reachable over HTTPS the
 moment the daemon starts routing it, and one certificate covers every
-subdomain. It costs a DNS provider plugin compiled into the binary (see
-[Install](#install)) and an API token for the zone. Without those, drop the
-`tls` block: Caddy then issues per name over HTTP-01, which is correct and needs
-nothing extra, but every new subdomain waits for its own issuance the first time
-it is asked for.
+subdomain. It costs the [`-dns` flavour](#two-flavours) — `dns cloudflare` above
+resolves to `dns.providers.cloudflare`, which is only in that build — and an API
+token for the zone. Without either, drop the `tls` block: Caddy then issues per
+name over HTTP-01, which is correct and runs on the lean flavour, but every new
+subdomain waits for its own issuance the first time it is asked for.
 
 The `https://` block is a catch-all for every other name that reaches the HTTPS
 port, and `on_demand` hands the decision to the daemon's `ask` endpoint — the
@@ -377,6 +429,7 @@ services:
       - state:/var/lib/scafo
 
   caddy:
+    # :latest-dns if the Caddyfile asks for a DNS-01 wildcard.
     image: ghcr.io/sandros94/scafo-caddy:latest
     # Sharing the node's network namespace is what makes the endpoint below a
     # real loopback address. It also means Caddy has no network of its own:

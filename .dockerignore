@@ -6,3 +6,7 @@ Dockerfile
 README.md
 PROTOCOL.md
 CONTRIBUTING.md
+examples
+# Passed to the build as DNS_PROVIDERS, never read from the context, so keeping
+# it out means editing the list does not invalidate the layer cache.
+dns-providers.txt

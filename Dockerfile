@@ -16,6 +16,18 @@ ARG CADDY_VERSION=2.11.4
 
 FROM caddy:${CADDY_VERSION}-builder AS builder
 
+# Extra Caddy modules to compile in, as whitespace-separated Go module paths,
+# each pinned (`github.com/caddy-dns/ovh@v1.1.0`). Empty by default, which is
+# the lean flavour published as :edge, :X.Y.Z and :latest.
+#
+# The curated DNS-01 set behind the :…-dns flavour is not written here: it lives
+# in dns-providers.txt, and the workflows pass it in. Anyone can pass a
+# different one:
+#
+#   docker build --build-arg DNS_PROVIDERS="$(.github/scripts/dns-providers.sh)" .
+#   docker build --build-arg DNS_PROVIDERS=github.com/caddy-dns/gandi@v1.0.3 .
+ARG DNS_PROVIDERS=""
+
 # The modules are compiled from this build context rather than fetched from the
 # module proxy, so the image always matches the tree it was built from.
 COPY . /src
@@ -24,7 +36,16 @@ COPY . /src
 # what compiles them all in. The builder image pins the Caddy version through
 # its own CADDY_VERSION environment variable, so xcaddy needs no version
 # argument.
-RUN xcaddy build --with github.com/sandros94/scafo-ingress=/src
+#
+# The providers are appended as positional arguments rather than interpolated
+# into one command line, so that the only place a value is split on whitespace
+# is the loop that means to split it.
+RUN set -eu; \
+	set -- --with github.com/sandros94/scafo-ingress=/src; \
+	for provider in ${DNS_PROVIDERS}; do \
+		set -- "$@" --with "${provider}"; \
+	done; \
+	xcaddy build "$@"
 
 FROM caddy:${CADDY_VERSION}
 

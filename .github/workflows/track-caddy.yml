@@ -50,6 +50,7 @@ jobs:
       sha: ${{ steps.release.outputs.sha }}
       release-tag: ${{ steps.release.outputs.release-tag }}
       image-tags: ${{ steps.release.outputs.image-tags }}
+      dns-image-tags: ${{ steps.release.outputs.dns-image-tags }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -117,6 +118,13 @@ jobs:
           # version, which is the check that catches interface drift.
           docker build .
           echo '::endgroup::'
+          echo '::group::docker build (dns)'
+          # And again with the providers, because a new Caddy can break one of
+          # them just as easily -- and the tracker publishes that flavour too,
+          # so it has to have proven it first.
+          docker build --build-arg \
+            "DNS_PROVIDERS=$(.github/scripts/dns-providers.sh | tr '\n' ' ')" .
+          echo '::endgroup::'
 
       - name: Push and draft the release
         id: release
@@ -151,6 +159,9 @@ jobs:
             echo "image-tags<<TAGS_EOF"
             .github/scripts/image-tags.sh "${args[@]}"
             echo "TAGS_EOF"
+            echo "dns-image-tags<<TAGS_EOF"
+            .github/scripts/image-tags.sh "${args[@]}" --flavor dns
+            echo "TAGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
           if [ -z "$next" ]; then
@@ -167,10 +178,10 @@ jobs:
           Tracks Caddy ${LATEST}. No module changes.
 
           - Caddy: ${LATEST}
-          - Image: ${IMAGE}:${next#v}
-          - Binaries: scafo-caddy-linux-amd64, scafo-caddy-linux-arm64, each with a .sha256
+          - Image: ${IMAGE}:${next#v}, and ${IMAGE}:${next#v}-dns with DNS-01 providers compiled in
+          - Binaries: scafo-caddy-linux-{amd64,arm64} and scafo-caddy-dns-linux-{amd64,arm64}, each with a .sha256
 
-          The release binaries are the same ones inside the image, lifted out of its builder stage.
+          The release binaries are the same ones inside the images, lifted out of the builder stage.
           NOTES
 
           gh release create "$next" \
@@ -242,6 +253,7 @@ jobs:
     with:
       ref: ${{ needs.bump.outputs.sha }}
       image-tags: ${{ needs.bump.outputs.image-tags }}
+      dns-image-tags: ${{ needs.bump.outputs.dns-image-tags }}
       release-tag: ${{ needs.bump.outputs.release-tag }}
 
   finalize:

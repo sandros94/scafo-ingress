@@ -1,0 +1,39 @@
+# The DNS-01 providers compiled into the `-dns` image and binary flavour.
+#
+# One Go module per line, pinned to an exact version. This file is the single
+# statement of that list: .github/scripts/dns-providers.sh reads it, the
+# workflows pass the result to the Dockerfile's DNS_PROVIDERS build argument,
+# and nothing else decides what goes in.
+#
+# Pins are exact so that a provider bump is a reviewable commit rather than
+# something that happens on its own between two builds of the same tree. See
+# CONTRIBUTING.md for how to move one.
+#
+# Entries are expected to follow the caddy-dns naming convention -- the last
+# path element, minus any /vN suffix, is the Caddy module name, so
+# github.com/caddy-dns/ovh registers dns.providers.ovh. The release build
+# asserts that every entry here registered under that name, so a provider that
+# breaks the convention fails the build rather than going missing quietly.
+#
+# Blank lines and lines beginning with # are ignored.
+
+# Bunny DNS.
+github.com/caddy-dns/bunny@v1.2.0
+
+# Cloudflare. The one the README's example uses.
+github.com/caddy-dns/cloudflare@v0.2.4
+
+# Hetzner DNS. Note the /v2 module path: the v2 line is a separate Go module,
+# and the unsuffixed path stops at v1.0.0.
+github.com/caddy-dns/hetzner/v2@v2.0.1
+
+# OVH.
+github.com/caddy-dns/ovh@v1.1.0
+
+# Amazon Route 53.
+github.com/caddy-dns/route53@v1.6.2
+
+# DigitalOcean. This repository has never cut a tag, so the pin is the Go
+# pseudo-version of a commit -- which is exact in the way that matters, naming
+# one revision, and moves only when this line is edited.
+github.com/caddy-dns/digitalocean@v0.0.0-20250606074528-04bde2867106

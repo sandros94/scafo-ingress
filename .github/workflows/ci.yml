@@ -49,9 +49,14 @@ jobs:
   smoke:
     # Compiling the modules inside xcaddy against a real Caddy tree is the only
     # check that catches interface drift in Caddy or certmagic. Pull requests
-    # do not publish, so a single native amd64 build is enough signal here; the
-    # per-architecture builds happen on the publishing path below.
-    name: xcaddy build
+    # do not publish, so a single native amd64 build per flavour is enough
+    # signal here; the per-architecture builds happen on the publishing path
+    # below.
+    #
+    # The dns flavour is built too, and in parallel: a pinned provider that no
+    # longer compiles against this Caddy is the same class of breakage, and the
+    # only place it can surface is a build that actually includes it.
+    name: xcaddy build ${{ matrix.flavor }}
     runs-on: ubuntu-24.04
     needs: test
     # success() is spelled out throughout this file because a custom if
@@ -59,11 +64,27 @@ jobs:
     if: success() && github.event_name == 'pull_request'
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [lean, dns]
     steps:
       - uses: actions/checkout@v4
 
       - name: docker build
-        run: docker build .
+        env:
+          FLAVOR: ${{ matrix.flavor }}
+        run: |
+          set -euo pipefail
+          case "$FLAVOR" in
+          lean) providers="" ;;
+          dns) providers="$(.github/scripts/dns-providers.sh | tr '\n' ' ')" ;;
+          *)
+            echo "ci: unknown flavor '$FLAVOR'" >&2
+            exit 1
+            ;;
+          esac
+          docker build --build-arg "DNS_PROVIDERS=${providers}" .
 
   tags:
     # What this run has earned the right to tag. Kept out of publish.yml so the
@@ -77,6 +98,7 @@ jobs:
       contents: read
     outputs:
       image-tags: ${{ steps.compute.outputs.tags }}
+      dns-image-tags: ${{ steps.compute.outputs.dns-tags }}
     steps:
       - uses: actions/checkout@v4
 
@@ -98,9 +120,14 @@ jobs:
           else
             args+=(--sha "$GITHUB_SHA")
           fi
+          # Both flavours earn the same tags from the same decision; only the
+          # suffix differs, and that is the tag script's to add.
           {
             echo "tags<<TAGS_EOF"
             .github/scripts/image-tags.sh "${args[@]}"
+            echo "TAGS_EOF"
+            echo "dns-tags<<TAGS_EOF"
+            .github/scripts/image-tags.sh "${args[@]}" --flavor dns
             echo "TAGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -128,4 +155,5 @@ jobs:
     with:
       ref: ${{ github.sha }}
       image-tags: ${{ needs.tags.outputs.image-tags }}
+      dns-image-tags: ${{ needs.tags.outputs.dns-image-tags }}
       release-tag: ${{ github.event.release.tag_name }}

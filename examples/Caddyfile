@@ -5,6 +5,11 @@
 # platform domain and the DNS provider with yours; everything else is meant to
 # be usable as it stands.
 #
+# The `dns cloudflare` line needs the -dns flavour -- ghcr.io/sandros94/
+# scafo-caddy:latest-dns, or scafo-caddy-dns-linux-<arch>. Everything else here
+# runs on either flavour, and dropping the tls block puts the whole file on the
+# lean one at the cost of per-name HTTP-01 issuance.
+#
 # See README.md for what each piece is for, and PROTOCOL.md for the contract
 # with the daemon.
 
@@ -96,9 +101,9 @@
 # certificate. DNS-01 is the suggested default: it needs no inbound request per
 # name, so a deployment is reachable the moment the daemon routes it.
 #
-# Without DNS credentials, drop the tls block and Caddy issues per name over
-# HTTP-01 instead -- correct, but each new subdomain then waits for its own
-# issuance.
+# Without the -dns flavour or without DNS credentials, drop the tls block and
+# Caddy issues per name over HTTP-01 instead -- correct, but each new subdomain
+# then waits for its own issuance.
 *.dev.example, dev.example {
 	tls {
 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}

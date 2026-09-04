@@ -491,12 +491,12 @@ func TestProvisionErrors(t *testing.T) {
 func TestProvisionFromJSONConfig(t *testing.T) {
 	// A JSON configuration never passes through the Caddyfile parser, so the
 	// struct tags are the whole contract for it.
-	t.Setenv("SCAFO_STORAGE_TOKEN", "json-token")
+	t.Setenv("SCAFO_INGRESS_TOKEN", "json-token")
 
 	const config = `{
 		"source": "scafo",
 		"endpoint": "http://127.0.0.1:7400/prefix",
-		"token": "{env.SCAFO_STORAGE_TOKEN}",
+		"token": "{env.SCAFO_INGRESS_TOKEN}",
 		"prefer": "vps-b",
 		"poll_interval": "10s"
 	}`
@@ -576,11 +576,11 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 			name: "placeholders are stored verbatim",
 			input: `scafo {
 				endpoint {env.SCAFO_ENDPOINT}
-				token    {env.SCAFO_STORAGE_TOKEN}
+				token    {env.SCAFO_INGRESS_TOKEN}
 				prefer   {env.SCAFO_PREFER}
 			}`,
 			wantEndpoint: "{env.SCAFO_ENDPOINT}",
-			wantToken:    "{env.SCAFO_STORAGE_TOKEN}",
+			wantToken:    "{env.SCAFO_INGRESS_TOKEN}",
 			wantPrefer:   "{env.SCAFO_PREFER}",
 		},
 		{

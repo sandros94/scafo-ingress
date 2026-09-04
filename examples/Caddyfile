@@ -1,7 +1,7 @@
 # A complete scafo ingress, using both modules in this repository.
 #
 # It expects a scafo node daemon on loopback at 127.0.0.1:7400 and one shared
-# environment variable, SCAFO_STORAGE_TOKEN. Replace dev.example with your
+# environment variable, SCAFO_INGRESS_TOKEN. Replace dev.example with your
 # platform domain and the DNS provider with yours; everything else is meant to
 # be usable as it stands.
 #
@@ -18,7 +18,7 @@
 	# daemon owns. Caddy never sees the bucket credentials.
 	storage scafo {
 		endpoint http://127.0.0.1:7400
-		token    {env.SCAFO_STORAGE_TOKEN}
+		token    {env.SCAFO_INGRESS_TOKEN}
 	}
 
 	# The daemon decides which customer domains it will issue for. This
@@ -37,7 +37,7 @@
 		# background and cached, not a backend address written down here.
 		dynamic scafo {
 			endpoint http://127.0.0.1:7400
-			token    {env.SCAFO_STORAGE_TOKEN}
+			token    {env.SCAFO_INGRESS_TOKEN}
 
 			# Put this node's own upstreams first, so a request that
 			# arrives here stays here whenever it can. Name another

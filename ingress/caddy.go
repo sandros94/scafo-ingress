@@ -55,7 +55,7 @@ const (
 //	  "dynamic_upstreams": {
 //	    "source": "scafo",
 //	    "endpoint": "http://127.0.0.1:7400",
-//	    "token": "{env.SCAFO_STORAGE_TOKEN}",
+//	    "token": "{env.SCAFO_INGRESS_TOKEN}",
 //	    "prefer": "self",
 //	    "poll_interval": "5s"
 //	  }
@@ -66,7 +66,7 @@ const (
 //	reverse_proxy {
 //	  dynamic scafo {
 //	    endpoint http://127.0.0.1:7400
-//	    token    {env.SCAFO_STORAGE_TOKEN}
+//	    token    {env.SCAFO_INGRESS_TOKEN}
 //	  }
 //	  lb_policy first
 //	}

@@ -155,15 +155,15 @@ Every value accepts Caddy's global placeholders, most usefully `{env.VAR}`.
 Both modules are provisioned before they serve anything, so request-scoped
 placeholders are not available here — only environment and system values.
 
-**Prefer `{env.SCAFO_STORAGE_TOKEN}` to a literal token.** The placeholder is
+**Prefer `{env.SCAFO_INGRESS_TOKEN}` to a literal token.** The placeholder is
 resolved during provisioning and is never written back into the configuration.
 Verified against Caddy 2.11.4: `caddy adapt` emits
-`"token": "{env.SCAFO_STORAGE_TOKEN}"` verbatim, and the admin API's
+`"token": "{env.SCAFO_INGRESS_TOKEN}"` verbatim, and the admin API's
 `GET /config/` returns the placeholder verbatim too — so neither a config file
 nor a config dump carries the token, only the running process holds it.
 
 Note the contrast with the Caddyfile's *other* environment form,
-`{$SCAFO_STORAGE_TOKEN}`: that one is substituted before parsing and does bake
+`{$SCAFO_INGRESS_TOKEN}`: that one is substituted before parsing and does bake
 the secret into the adapted JSON. Use `{env.…}`, not `{$…}`.
 
 The token authorizes these two APIs only, and the endpoint is expected to be
@@ -178,7 +178,7 @@ publicly on the strength of the token alone.
 {
 	storage scafo {
 		endpoint http://127.0.0.1:7400
-		token    {env.SCAFO_STORAGE_TOKEN}
+		token    {env.SCAFO_INGRESS_TOKEN}
 	}
 }
 
@@ -192,7 +192,7 @@ example.com {
   "storage": {
     "module": "scafo",
     "endpoint": "http://127.0.0.1:7400",
-    "token": "{env.SCAFO_STORAGE_TOKEN}"
+    "token": "{env.SCAFO_INGRESS_TOKEN}"
   }
 }
 ```
@@ -217,7 +217,7 @@ It goes inside a `reverse_proxy` block, as `dynamic scafo`:
 reverse_proxy {
 	dynamic scafo {
 		endpoint http://127.0.0.1:7400
-		token    {env.SCAFO_STORAGE_TOKEN}
+		token    {env.SCAFO_INGRESS_TOKEN}
 	}
 	lb_policy first
 }
@@ -229,7 +229,7 @@ reverse_proxy {
   "dynamic_upstreams": {
     "source": "scafo",
     "endpoint": "http://127.0.0.1:7400",
-    "token": "{env.SCAFO_STORAGE_TOKEN}"
+    "token": "{env.SCAFO_INGRESS_TOKEN}"
   },
   "load_balancing": { "selection_policy": { "policy": "first" } }
 }
@@ -283,7 +283,7 @@ That only means something if failure is detected, which is what the rest is for:
 reverse_proxy {
 	dynamic scafo {
 		endpoint http://127.0.0.1:7400
-		token    {env.SCAFO_STORAGE_TOKEN}
+		token    {env.SCAFO_INGRESS_TOKEN}
 	}
 
 	lb_policy       first
@@ -365,7 +365,7 @@ outline:
 {
 	storage scafo {
 		endpoint http://127.0.0.1:7400
-		token    {env.SCAFO_STORAGE_TOKEN}
+		token    {env.SCAFO_INGRESS_TOKEN}
 	}
 
 	# The daemon decides which customer domains it will issue for. This
@@ -380,7 +380,7 @@ outline:
 	reverse_proxy {
 		dynamic scafo {
 			endpoint http://127.0.0.1:7400
-			token    {env.SCAFO_STORAGE_TOKEN}
+			token    {env.SCAFO_INGRESS_TOKEN}
 		}
 		lb_policy     first
 		fail_duration 30s
@@ -438,7 +438,7 @@ services:
   scafo-node:
     image: ghcr.io/sandros94/scafo:latest
     environment:
-      SCAFO_STORAGE_TOKEN: ${STORAGE_TOKEN:?set STORAGE_TOKEN in .env}
+      SCAFO_INGRESS_TOKEN: ${INGRESS_TOKEN:?set INGRESS_TOKEN in .env}
       # ...the daemon's own bucket credentials and settings
     ports:
       - "80:80"
@@ -457,7 +457,7 @@ services:
     depends_on:
       - scafo-node
     environment:
-      SCAFO_STORAGE_TOKEN: ${STORAGE_TOKEN:?set STORAGE_TOKEN in .env}
+      SCAFO_INGRESS_TOKEN: ${INGRESS_TOKEN:?set INGRESS_TOKEN in .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
 
@@ -508,13 +508,13 @@ renewals and route updates rather than handshakes and requests.
 
 **A fleet — expand, then contract:**
 
-1. Give the daemon both tokens, new and old — `SCAFO_STORAGE_TOKEN="new,old"`,
+1. Give the daemon both tokens, new and old — `SCAFO_INGRESS_TOKEN="new,old"`,
    comma-separated, new one first — and restart it. Both are accepted, the
    daemon's token file now holds the new one; nothing else has moved yet.
 2. Reload each Caddy with the new token, at leisure — one at a time, on your own
    schedule. Reloads are graceful, not restarts.
 3. Once every Caddy is on the new token, contract the daemon to the new one
-   alone — `SCAFO_STORAGE_TOKEN="new"` — and restart it. The old token stops
+   alone — `SCAFO_INGRESS_TOKEN="new"` — and restart it. The old token stops
    working.
 
 **A single daemon and a single Caddy** can skip the expand step: set the new

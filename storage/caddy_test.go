@@ -206,11 +206,11 @@ func TestProvisionExpandsInlineTokenPlaceholder(t *testing.T) {
 	// This is the recommended deployment shape: one environment variable
 	// shared by the daemon and by Caddy, named in the config rather than
 	// pasted into it.
-	t.Setenv("SCAFO_STORAGE_TOKEN", "  token-from-the-environment\n")
+	t.Setenv("SCAFO_INGRESS_TOKEN", "  token-from-the-environment\n")
 
 	module := &Module{Config: nodeapi.Config{
 		Endpoint: "http://127.0.0.1:7400",
-		Token:    "{env.SCAFO_STORAGE_TOKEN}",
+		Token:    "{env.SCAFO_INGRESS_TOKEN}",
 	}}
 	if err := module.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -223,19 +223,19 @@ func TestProvisionExpandsInlineTokenPlaceholder(t *testing.T) {
 func TestProvisionFromJSONConfig(t *testing.T) {
 	// A JSON configuration never passes through the Caddyfile parser, so the
 	// struct tags are the whole contract for it.
-	t.Setenv("SCAFO_STORAGE_TOKEN", "json-token")
+	t.Setenv("SCAFO_INGRESS_TOKEN", "json-token")
 
 	const config = `{
 		"module": "scafo",
 		"endpoint": "http://127.0.0.1:7400/prefix",
-		"token": "{env.SCAFO_STORAGE_TOKEN}"
+		"token": "{env.SCAFO_INGRESS_TOKEN}"
 	}`
 
 	var module Module
 	if err := json.Unmarshal([]byte(config), &module); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
-	if module.Token != "{env.SCAFO_STORAGE_TOKEN}" {
+	if module.Token != "{env.SCAFO_INGRESS_TOKEN}" {
 		t.Errorf("Token = %q, want the unexpanded placeholder", module.Token)
 	}
 	if err := module.Provision(caddy.Context{}); err != nil {
@@ -321,11 +321,11 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 			name: "inline token as an environment placeholder",
 			input: `scafo {
 				endpoint {env.SCAFO_STORAGE_ENDPOINT}
-				token {env.SCAFO_STORAGE_TOKEN}
+				token {env.SCAFO_INGRESS_TOKEN}
 			}`,
 			// The parser stores placeholders verbatim; Provision expands them.
 			wantEndpoint: "{env.SCAFO_STORAGE_ENDPOINT}",
-			wantToken:    "{env.SCAFO_STORAGE_TOKEN}",
+			wantToken:    "{env.SCAFO_INGRESS_TOKEN}",
 		},
 		{
 			// Parsing both is fine -- Provision is where they are rejected --

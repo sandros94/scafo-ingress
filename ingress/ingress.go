@@ -297,9 +297,10 @@ func NormalizeHost(host string) string {
 // lookups from it.
 //
 // A Routes value is safe for concurrent readers -- Document is an atomic load
-// -- while fetching is single-threaded by construction: Provision performs the
-// first fetch and only then starts the poller, and the poller never overlaps
-// itself.
+// -- while fetching is single-threaded by construction: the first fetch happens
+// before the poller is started, and the poller never overlaps itself. One
+// Routes therefore serves every handler that wants the same document; see
+// sharedRoutes in caddy.go.
 type Routes struct {
 	// base is the daemon's base URL with any trailing slash removed, so that
 	// request paths can be appended directly.
@@ -318,8 +319,13 @@ type Routes struct {
 	// traffic.
 	client *http.Client
 
-	// logger reports fetch failures and recoveries.
-	logger *zap.Logger
+	// logger reports fetch failures and recoveries. It is replaceable, and
+	// atomic, because a Routes outlives the configuration that created it: the
+	// poller is shared between handlers and survives reloads, so each
+	// configuration that adopts it lends it its own logger rather than leaving
+	// it writing to the log of a configuration that has been unloaded. See
+	// SetLogger.
+	logger atomic.Pointer[zap.Logger]
 
 	// current holds the last document that parsed, or nil before the first
 	// one arrives. It is the only field a request reads.
@@ -341,21 +347,45 @@ type Routes struct {
 // error and yields a Routes whose every fetch fails. A nil logger is replaced
 // by one that discards.
 func NewRoutes(endpoint *url.URL, token, prefer string, logger *zap.Logger) *Routes {
-	var base string
-	if endpoint != nil {
-		base = strings.TrimSuffix(endpoint.String(), "/")
-	}
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Routes{
-		base:   base,
+	routes := &Routes{
+		base:   BaseURL(endpoint),
 		token:  token,
 		prefer: prefer,
 		client: &http.Client{
 			Timeout: DefaultRequestTimeout,
 		},
-		logger: logger,
+	}
+	routes.logger.Store(logger)
+	return routes
+}
+
+// BaseURL reduces an endpoint to the form protocol paths are appended to: its
+// string with any trailing separator removed.
+//
+// It is what a Routes is built on and what callers sharing one key it by, so
+// that two endpoints differing only by a trailing slash are one conversation
+// with the daemon rather than two.
+func BaseURL(endpoint *url.URL) string {
+	if endpoint == nil {
+		return ""
+	}
+	return strings.TrimSuffix(endpoint.String(), "/")
+}
+
+// SetLogger hands the poller the logger to report fetch failures and
+// recoveries to, replacing the one it holds. A nil logger is ignored, so a
+// caller without one leaves the poller's own in place rather than silencing it.
+//
+// It exists because a shared poller has no single owner: it is provisioned by
+// one configuration and may still be running under the next, and the logger it
+// should be writing to is the one belonging to a configuration that is still
+// loaded.
+func (r *Routes) SetLogger(logger *zap.Logger) {
+	if logger != nil {
+		r.logger.Store(logger)
 	}
 }
 
@@ -444,11 +474,12 @@ func (r *Routes) Refresh(ctx context.Context) {
 		}
 		if !r.failing {
 			r.failing = true
+			logger := r.logger.Load()
 			if r.current.Load() == nil {
-				r.logger.Warn("fetching the routing document failed and none is known yet; requests will not be routed until the daemon answers",
+				logger.Warn("fetching the routing document failed and none is known yet; requests will not be routed until the daemon answers",
 					zap.Error(err))
 			} else {
-				r.logger.Warn("fetching the routing document failed; serving the last one that parsed",
+				logger.Warn("fetching the routing document failed; serving the last one that parsed",
 					zap.Error(err))
 			}
 		}
@@ -456,7 +487,7 @@ func (r *Routes) Refresh(ctx context.Context) {
 	}
 	if r.failing {
 		r.failing = false
-		r.logger.Info("the routing document is available again")
+		r.logger.Load().Info("the routing document is available again")
 	}
 	r.current.Store(doc)
 }

@@ -202,6 +202,15 @@ The module polls this endpoint every `poll_interval` (5s by default), with a
 interval *between* attempts rather than on a schedule, so a slow answer delays
 the next request instead of stacking up behind it.
 
+A daemon sees one poller per *configuration*, not one per `reverse_proxy`
+handler. What decides the answer or its cadence — the endpoint, the token,
+`prefer`, `poll_interval` — identifies a poller, and every handler asking for
+the same one shares it and the document it holds. A reload hands the running
+poller over rather than starting a second: the incoming configuration takes its
+reference before the outgoing one gives its own back, so polling never pauses
+and the last document that parsed keeps answering throughout. Polling stops when
+the last handler using it is cleaned up.
+
 The first fetch is attempted while Caddy is provisioning, so a healthy pair
 starts already routing. **Its failure does not fail startup.** A daemon that is
 restarting under a running ingress must not be able to keep Caddy from coming

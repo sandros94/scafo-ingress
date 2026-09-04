@@ -37,6 +37,48 @@ func provisionedModule(t *testing.T, raw string) *Module {
 	return module
 }
 
+// moduleFor returns an unprovisioned module pointed at server.
+func moduleFor(server *routesServer, prefer string, interval time.Duration) *Module {
+	return &Module{
+		Config:       nodeapi.Config{Endpoint: server.URL, Token: "test-token"},
+		Prefer:       prefer,
+		PollInterval: caddy.Duration(interval),
+	}
+}
+
+// provision provisions a module on a context of its own, the way Caddy does,
+// and fails the test if it does not come up.
+func provision(t *testing.T, module *Module) {
+	t.Helper()
+	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+	t.Cleanup(cancel)
+	if err := module.Provision(ctx); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+}
+
+// cleanup cleans a module up the way Caddy does when its configuration goes
+// away.
+func cleanup(t *testing.T, module *Module) {
+	t.Helper()
+	if err := module.Cleanup(); err != nil {
+		t.Errorf("Cleanup: %v", err)
+	}
+}
+
+// waitForRequests blocks until server has served at least n requests, and fails
+// the test if that takes longer than it ever should.
+func waitForRequests(t *testing.T, server *routesServer, n int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for server.requests.Load() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("the daemon was asked %d times in 5s, want at least %d", server.requests.Load(), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestGetUpstreams(t *testing.T) {
 	module := provisionedModule(t, testDocument)
 
@@ -199,6 +241,167 @@ func TestProvisionFetchesOnce(t *testing.T) {
 	}
 }
 
+func TestProvisionSharesOnePoller(t *testing.T) {
+	// The shape this is about: a snippet imported into several site blocks is
+	// several instances of this module, asking one daemon the same question.
+	// They get one poller between them, so the daemon sees one conversation and
+	// the process holds one document however many handlers there are.
+	server := newRoutesServer(t, testDocument)
+	first := moduleFor(server, "", time.Hour)
+	second := moduleFor(server, "", time.Hour)
+
+	provision(t, first)
+	provision(t, second)
+	key := first.shared.key
+
+	if first.routes != second.routes {
+		t.Error("the two handlers hold different pollers, want the same one")
+	}
+	// The interval is an hour, so every request the daemon has seen is a fetch
+	// at provisioning: one, not one per handler.
+	if got := server.requests.Load(); got != 1 {
+		t.Errorf("the daemon was asked %d times, want once for the two handlers", got)
+	}
+	if refs, ok := routesPool.References(key); !ok || refs != 2 {
+		t.Errorf("references = %d (present: %t), want 2", refs, ok)
+	}
+
+	cleanup(t, first)
+	if refs, ok := routesPool.References(key); !ok || refs != 1 {
+		t.Errorf("references after one handler left = %d (present: %t), want 1", refs, ok)
+	}
+	cleanup(t, second)
+	if _, ok := routesPool.References(key); ok {
+		t.Error("the poller is still pooled after the last handler was cleaned up")
+	}
+
+	// Cleaning up twice must not be a panic; Caddy calls it once, and the pool
+	// counts.
+	cleanup(t, second)
+}
+
+func TestProvisionSeparatesUnlikeConfigurations(t *testing.T) {
+	// What decides the document, or how often it is asked for, decides which
+	// poller a handler gets. Anything else would have one handler's routing
+	// depend on another handler's configuration.
+	tests := []struct {
+		name   string
+		mutate func(*Module)
+	}{
+		{
+			// prefer changes the order the daemon puts upstreams in, which is
+			// the whole point of it: sharing across it would hand a handler
+			// somebody else's idea of "local".
+			name:   "prefer",
+			mutate: func(m *Module) { m.Prefer = "vps-b" },
+		},
+		{
+			// A credential is scoped by the daemon that issued it.
+			name:   "token",
+			mutate: func(m *Module) { m.Token = "another-token" },
+		},
+		{
+			// A handler that asks not to be more than a second stale must not
+			// inherit another's hour.
+			name:   "poll_interval",
+			mutate: func(m *Module) { m.PollInterval = caddy.Duration(2 * time.Hour) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newRoutesServer(t, testDocument)
+			first := moduleFor(server, "self", time.Hour)
+			second := moduleFor(server, "self", time.Hour)
+			tt.mutate(second)
+
+			provision(t, first)
+			provision(t, second)
+			defer cleanup(t, second)
+			defer cleanup(t, first)
+
+			if first.routes == second.routes {
+				t.Error("the two handlers share one poller, want one each")
+			}
+			if got := server.requests.Load(); got != 2 {
+				t.Errorf("the daemon was asked %d times, want once per handler", got)
+			}
+		})
+	}
+}
+
+func TestCleanupStopsTheSharedPoller(t *testing.T) {
+	server := newRoutesServer(t, testDocument)
+	first := moduleFor(server, "", 5*time.Millisecond)
+	second := moduleFor(server, "", 5*time.Millisecond)
+
+	provision(t, first)
+	provision(t, second)
+	waitForRequests(t, server, 3)
+
+	// One handler leaving is what a reload looks like from here, and it must
+	// not stop a poller the others are still reading.
+	cleanup(t, first)
+	waitForRequests(t, server, server.requests.Load()+3)
+
+	// The last one leaving does stop it. Cleanup waits for the polling
+	// goroutine to return, so the count is final as soon as it comes back.
+	cleanup(t, second)
+	settled := server.requests.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := server.requests.Load(); got != settled {
+		t.Errorf("the daemon was asked %d more times after the last handler was cleaned up", got-settled)
+	}
+}
+
+func TestReloadKeepsTheDocument(t *testing.T) {
+	// A reload is: provision the new configuration, then clean up the old. The
+	// poller is shared, so the new handler inherits it mid-flight instead of
+	// starting one -- and with it the document, which keeps answering requests
+	// while the swap happens.
+	server := newRoutesServer(t, testDocument)
+	old := moduleFor(server, "", time.Hour)
+	provision(t, old)
+
+	doc := old.routes.Document()
+	if doc == nil {
+		t.Fatal("Document = nil after provisioning against a healthy daemon")
+	}
+
+	// The daemon goes down exactly during the reload, which is the case worth
+	// having: a fresh poller would have nothing to route with, and this one is
+	// not asked for anything.
+	server.status.Store(http.StatusServiceUnavailable)
+
+	fresh := moduleFor(server, "", time.Hour)
+	provision(t, fresh)
+	cleanup(t, old)
+	defer cleanup(t, fresh)
+
+	if fresh.routes != old.routes {
+		t.Error("the reloaded handler holds a different poller, want the one already running")
+	}
+	if fresh.routes.Document() != doc {
+		t.Error("the document did not survive the reload")
+	}
+	if got := server.requests.Load(); got != 1 {
+		t.Errorf("the daemon was asked %d times, want only the first handler's fetch", got)
+	}
+
+	// And no request in the window sees a gap.
+	req, vars := requestFor(t, "app.dev.example", "/")
+	upstreams, err := fresh.GetUpstreams(req)
+	if err != nil {
+		t.Fatalf("GetUpstreams: %v", err)
+	}
+	if got := dials(upstreams); strings.Join(got, ",") != "10.83.0.1:41002,10.83.0.2:41002" {
+		t.Errorf("dials = %v, want the document's upstreams", got)
+	}
+	if got := vars[RouteVar]; got != string(OutcomeRoute) {
+		t.Errorf("%s = %v, want %q", RouteVar, got, OutcomeRoute)
+	}
+}
+
 func TestProvisionExpandsPlaceholders(t *testing.T) {
 	t.Setenv("SCAFO_TEST_PREFER", "vps-b")
 	module := &Module{
@@ -211,6 +414,8 @@ func TestProvisionExpandsPlaceholders(t *testing.T) {
 	if err := module.Provision(ctx); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
+	defer cleanup(t, module)
+
 	if module.routes.prefer != "vps-b" {
 		t.Errorf("prefer = %q, want the expanded value", module.routes.prefer)
 	}
@@ -230,6 +435,8 @@ func TestProvisionKeepsPreferNone(t *testing.T) {
 	if err := module.Provision(ctx); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
+	defer cleanup(t, module)
+
 	if module.routes.prefer != PreferNone {
 		t.Errorf("prefer = %q, want %q", module.routes.prefer, PreferNone)
 	}
@@ -310,6 +517,8 @@ func TestProvisionFromJSONConfig(t *testing.T) {
 	if err := module.Provision(ctx); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
+	defer cleanup(t, &module)
+
 	if module.routes.token != "json-token" {
 		t.Errorf("token = %q, want %q", module.routes.token, "json-token")
 	}

@@ -247,6 +247,13 @@ a map lookup and no round trip to the daemon. A request's host, minus any port
 and lowercased, is the lookup key; a deployment's route wins over the platform's
 own API surface if they ever share a name.
 
+**One poller, not one per site block.** A snippet imported into twenty site
+blocks is twenty instances of this module, and they share a single poller and a
+single cached document: everything with the same `endpoint`, token, `prefer` and
+`poll_interval` is one conversation with the daemon, so the fetch happens once
+per interval no matter how many blocks ask for it. Only what changes the
+document, or how often it is asked for, splits them apart.
+
 **The daemon must be reachable when Caddy starts, but not for Caddy to start.**
 The first fetch is attempted during provisioning, so a healthy pair begins
 already routing; if it fails, the failure is logged and the poller carries on,
@@ -254,6 +261,12 @@ because a node restarting under a running ingress must not be able to keep Caddy
 from coming back. Only a configuration error fails startup. Once a document has
 arrived, later fetch failures cost nothing at all: the last one that parsed
 keeps answering, and the log says so once rather than once per poll.
+
+A reload does not start over either. The incoming configuration's handlers pick
+up the poller that is already running before the outgoing ones let go of it, so
+the document that was answering requests keeps answering them across the swap —
+including when the daemon happens to be down at that moment. The poller stops
+only when the last handler using it goes away.
 
 ### Load balancing
 
@@ -514,16 +527,21 @@ affected by daemon downtime — TLS handshakes are served from the in-memory
 certificate cache, requests are routed from the last document that parsed, and
 only background work fails and is retried later: renewals, OCSP staple
 refreshes, a certificate for a new name, a route that has changed since the last
-successful poll. A Caddy that starts, restarts, or reloads while the daemon is
-down has an empty certificate cache and no routing document, so TLS fails and
-every request is `unavailable` until the daemon returns. That is the failure
-mode to design around:
+successful poll. A Caddy that starts or restarts while the daemon is down has an
+empty certificate cache and no routing document, so TLS fails and every request
+is `unavailable` until the daemon returns. That is the failure mode to design
+around:
 
 - Start the daemon before Caddy and stop it after, so Caddy never outlives it.
 - Compose: share the node's network namespace, as above, and `depends_on` it.
 - systemd: order the Caddy unit `After=` the daemon's.
 - Kubernetes: run the daemon as a sidecar in the Caddy pod with a startup probe,
   so it is ready before Caddy's container begins.
+
+A **reload** is none of those things: it is graceful, and the routing document
+survives it along with the certificate cache, because the incoming
+configuration's handlers inherit the poller the outgoing ones were using. A
+daemon that is down during a reload is not a window of `unavailable`.
 
 Provisioning is deliberately loud about configuration and deliberately quiet
 about the daemon: a missing, unreadable or empty token aborts startup with an

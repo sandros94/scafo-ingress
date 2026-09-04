@@ -204,7 +204,7 @@ credential manager hands one over as a path:
 {
 	storage scafo {
 		endpoint   http://127.0.0.1:7400
-		token_file /var/lib/scafo/storage-token
+		token_file /var/lib/scafo/ingress-token
 	}
 }
 ```
@@ -478,7 +478,7 @@ and places a copy only Caddy's UID can open in `$CREDENTIALS_DIRECTORY`:
 After=scafo-node.service
 
 [Service]
-LoadCredential=storage-token:/var/lib/scafo/storage-token
+LoadCredential=ingress-token:/var/lib/scafo/ingress-token
 ExecStart=/usr/bin/caddy run --config /etc/scafo/caddy.json
 Restart=on-failure
 StartLimitIntervalSec=0
@@ -486,7 +486,7 @@ StartLimitIntervalSec=0
 
 ```json
 { "storage": { "module": "scafo", "endpoint": "http://127.0.0.1:7400",
-               "token_file": "{env.CREDENTIALS_DIRECTORY}/storage-token" } }
+               "token_file": "{env.CREDENTIALS_DIRECTORY}/ingress-token" } }
 ```
 
 `After=` only means scafod was exec'd; the token appears a moment

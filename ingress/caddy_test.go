@@ -89,6 +89,7 @@ func TestGetUpstreams(t *testing.T) {
 		wantDials   []string
 		wantOutcome Outcome
 		wantHost    string
+		wantMatched string
 	}{
 		{
 			name:        "route",
@@ -97,6 +98,7 @@ func TestGetUpstreams(t *testing.T) {
 			wantDials:   []string{"10.83.0.1:41002", "10.83.0.2:41002"},
 			wantOutcome: OutcomeRoute,
 			wantHost:    "app.dev.example",
+			wantMatched: "app.dev.example",
 		},
 		{
 			// The Host header carries a port whenever the listener is not on
@@ -107,6 +109,18 @@ func TestGetUpstreams(t *testing.T) {
 			wantDials:   []string{"10.83.0.1:41002", "10.83.0.2:41002"},
 			wantOutcome: OutcomeRoute,
 			wantHost:    "app.dev.example",
+			wantMatched: "app.dev.example",
+		},
+		{
+			// The host variable stays the request's own name; the pattern
+			// that answered it is the other variable's business.
+			name:        "wildcard route",
+			host:        "One.Shop.Example:8443",
+			target:      "/",
+			wantDials:   []string{"10.83.0.3:41004"},
+			wantOutcome: OutcomeRoute,
+			wantHost:    "one.shop.example",
+			wantMatched: "*.shop.example",
 		},
 		{
 			name:        "api host",
@@ -115,6 +129,7 @@ func TestGetUpstreams(t *testing.T) {
 			wantDials:   []string{"127.0.0.1:7400"},
 			wantOutcome: OutcomeRoute,
 			wantHost:    "dev.example",
+			wantMatched: "dev.example",
 		},
 		{
 			name:        "api host, denied path",
@@ -122,6 +137,7 @@ func TestGetUpstreams(t *testing.T) {
 			target:      "/v1/storage/objects/x",
 			wantOutcome: OutcomeDenied,
 			wantHost:    "dev.example",
+			wantMatched: "dev.example",
 		},
 		{
 			name:        "unknown host",
@@ -151,6 +167,9 @@ func TestGetUpstreams(t *testing.T) {
 			if got := vars[HostVar]; got != tt.wantHost {
 				t.Errorf("%s = %v, want %q", HostVar, got, tt.wantHost)
 			}
+			if got := vars[MatchVar]; got != tt.wantMatched {
+				t.Errorf("%s = %v, want %q", MatchVar, got, tt.wantMatched)
+			}
 		})
 	}
 }
@@ -170,6 +189,9 @@ func TestGetUpstreamsWithoutADocument(t *testing.T) {
 	// and an operator turning unknown hosts into 404 must not catch this too.
 	if got := vars[RouteVar]; got != string(OutcomeUnavailable) {
 		t.Errorf("%s = %v, want %q", RouteVar, got, OutcomeUnavailable)
+	}
+	if got := vars[MatchVar]; got != "" {
+		t.Errorf("%s = %v, want it empty", MatchVar, got)
 	}
 }
 

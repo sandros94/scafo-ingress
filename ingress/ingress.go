@@ -95,17 +95,27 @@ type Upstream struct {
 	Address string `json:"address"`
 }
 
+// WildcardPrefix is the one label a route host may carry in place of a name:
+// a host of the form "*.example.com" covers every single-label name under
+// example.com. It is the only form of wildcard the document may use -- one
+// leading "*." and no other asterisk anywhere -- and it covers exactly one
+// label, so it matches a.example.com and neither b.a.example.com nor
+// example.com itself.
+const WildcardPrefix = "*."
+
 // Route is one host the fleet serves and the ordered backends behind it.
+//
+// Host is either a name or a wildcard (see WildcardPrefix), which is what an
+// operator gets by claiming a custom domain together with its subdomains.
 //
 // The order is a priority, never a weighting: the first upstream is the one to
 // use, and the rest exist for when it fails. With prefer=self the answering
 // node's own upstreams come first, so a colocated Caddy that honours the order
 // stays on the local process and only leaves the node when it has to.
 type Route struct {
-	Host      string     `json:"host"`
-	Project   string     `json:"project"`
-	Env       string     `json:"env"`
-	Upstreams []Upstream `json:"upstreams"`
+	Host        string     `json:"host"`
+	Application string     `json:"application"`
+	Upstreams   []Upstream `json:"upstreams"`
 }
 
 // API describes the fleet API surface, when the answering node publishes it.
@@ -136,6 +146,12 @@ type Document struct {
 	// for it, in document order.
 	hostUpstreams map[string][]*reverseproxy.Upstream
 
+	// wildcardUpstreams maps the base of a wildcard route -- "example.com" for
+	// a host of "*.example.com" -- onto the upstreams to dial for it. It is
+	// kept apart from hostUpstreams so that a name is only ever answered by a
+	// wildcard once no route names it exactly.
+	wildcardUpstreams map[string][]*reverseproxy.Upstream
+
 	// apiHosts is the set of normalized fleet API hosts.
 	apiHosts map[string]struct{}
 
@@ -153,22 +169,39 @@ type Document struct {
 // every retry, and asks for it to be instantaneous.
 func (d *Document) index() {
 	d.hostUpstreams = make(map[string][]*reverseproxy.Upstream, len(d.Routes))
+	d.wildcardUpstreams = make(map[string][]*reverseproxy.Upstream)
 	for _, route := range d.Routes {
 		host := NormalizeHost(route.Host)
 		if host == "" {
 			continue
 		}
+
+		into := d.hostUpstreams
+		if strings.Contains(host, "*") {
+			base, ok := wildcardBase(host)
+			if !ok {
+				// A wildcard this module cannot read is dropped, which is
+				// what every other entry it cannot use gets: an empty host,
+				// a repeated one, an upstream with no address. Routing a
+				// name against a pattern only half of the two sides agree
+				// on is the one outcome worth refusing outright.
+				continue
+			}
+			host = base
+			into = d.wildcardUpstreams
+		}
+
 		// The document is sorted by host and holds each one once; if a
 		// daemon repeats one anyway, the first wins rather than the last,
 		// so the answer does not depend on how far the scan got.
-		if _, taken := d.hostUpstreams[host]; taken {
+		if _, taken := into[host]; taken {
 			continue
 		}
 		// A route with no usable upstreams is kept, deliberately: the host
 		// exists, it simply has nothing running behind it right now. Losing
 		// it here would turn that into "no such host", which is a different
 		// and wrong answer.
-		d.hostUpstreams[host] = dialTargets(route.Upstreams)
+		into[host] = dialTargets(route.Upstreams)
 	}
 
 	if d.API == nil {
@@ -196,30 +229,75 @@ func (d *Document) index() {
 }
 
 // Lookup resolves a normalized host and a request path against the document,
-// returning the upstreams to proxy to and why.
+// returning the upstreams to proxy to, why, and the document key that answered
+// -- a route host, a wildcard pattern, or a fleet API host. The key is empty
+// when nothing in the document matched.
 //
-// Routes are consulted before API hosts, so an application that has been given
-// a name the platform also answers on keeps that name. The daemon's renderer
-// already omits such apexes from the API section, but the precedence is stated
-// here too rather than assumed of the peer.
+// Three things are consulted, in this order, and the order is the contract:
+//
+//  1. a route naming the host exactly, which therefore wins even when it has no
+//     upstreams at all -- "this host exists and has nothing running" is an
+//     answer, and falling through to a wildcard would replace it with another
+//     application's process;
+//  2. a fleet API host naming it exactly, so that an application route keeps a
+//     name the platform also answers on while a wildcard never takes one away
+//     from the platform;
+//  3. a wildcard route covering it, which is the host with its first label
+//     replaced by "*" and looked up once. One label, no more: a.b.example.com
+//     is not covered by *.example.com, and neither is example.com.
 //
 // A nil Document -- no successful fetch yet -- resolves to OutcomeUnavailable
 // for every request, which is a different thing from a document that has been
 // read and does not mention the host.
-func (d *Document) Lookup(host, path string) ([]*reverseproxy.Upstream, Outcome) {
+func (d *Document) Lookup(host, path string) ([]*reverseproxy.Upstream, Outcome, string) {
 	if d == nil {
-		return nil, OutcomeUnavailable
+		return nil, OutcomeUnavailable, ""
 	}
 	if upstreams, ok := d.hostUpstreams[host]; ok {
-		return upstreams, OutcomeRoute
+		return upstreams, OutcomeRoute, host
 	}
-	if _, ok := d.apiHosts[host]; !ok {
-		return nil, OutcomeUnknown
+	if _, ok := d.apiHosts[host]; ok {
+		if d.deniesPath(path) {
+			return nil, OutcomeDenied, host
+		}
+		return d.apiUpstreams, OutcomeRoute, host
 	}
-	if d.deniesPath(path) {
-		return nil, OutcomeDenied
+	if base, ok := wildcardCover(host); ok {
+		if upstreams, ok := d.wildcardUpstreams[base]; ok {
+			return upstreams, OutcomeRoute, WildcardPrefix + base
+		}
 	}
-	return d.apiUpstreams, OutcomeRoute
+	return nil, OutcomeUnknown, ""
+}
+
+// wildcardBase reports the base a document's wildcard host covers, and whether
+// the host is a wildcard this module can read at all.
+//
+// Exactly one leading "*." and no other asterisk anywhere: "*.example.com" is
+// the base "example.com", while "*", "*.", "a.*.com", "*.*.com" and "*x.com"
+// are none of it. Returning false for those is what keeps a pattern the two
+// sides would read differently out of the index.
+func wildcardBase(host string) (string, bool) {
+	base, found := strings.CutPrefix(host, WildcardPrefix)
+	if !found || base == "" || strings.Contains(base, "*") {
+		return "", false
+	}
+	return base, true
+}
+
+// wildcardCover reports the base of the one wildcard that could cover host: the
+// host with its first label removed, so that a lookup for a.example.com asks
+// about "example.com" and nothing else.
+//
+// A host with no label to give up -- "example", or the empty host -- is covered
+// by no wildcard, and neither is a request that carries an asterisk of its own:
+// a wildcard covers names, and "*.example.com" asked for literally is not one.
+func wildcardCover(host string) (string, bool) {
+	label, base, found := strings.Cut(host, ".")
+	if !found || label == "" || base == "" || strings.Contains(host, "*") {
+		return "", false
+	}
+	return base, true
 }
 
 // deniesPath reports whether path falls under one of the fleet API's denied

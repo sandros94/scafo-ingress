@@ -29,8 +29,15 @@ const (
 	// RouteVar carries an Outcome: ok, denied, unknown or unavailable.
 	RouteVar = "scafo.route"
 
-	// HostVar carries the normalized host the lookup was keyed by.
+	// HostVar carries the normalized host the lookup was keyed by, which is
+	// always the request's own host and never the pattern that answered it.
 	HostVar = "scafo.host"
+
+	// MatchVar carries the document key that answered: a route host, a
+	// wildcard pattern such as "*.example.com", or a fleet API host. It is
+	// empty when nothing in the document matched, and when there is no
+	// document yet.
+	MatchVar = "scafo.matched"
 )
 
 // Module is the Caddy dynamic upstreams module
@@ -288,8 +295,9 @@ func (m *Module) Provision(ctx caddy.Context) error {
 // reverseproxy.UpstreamSource.
 //
 // The lookup key is the request's Host with any port stripped and lowercased.
-// A route wins over a fleet API host of the same name; on an API host, a path
-// under one of the daemon's denied prefixes resolves to nothing at all.
+// A route wins over a fleet API host of the same name, and both win over a
+// wildcard route covering it; on an API host, a path under one of the daemon's
+// denied prefixes resolves to nothing at all. See Document.Lookup.
 //
 // A request that resolves to nothing gets an empty slice and no error, which is
 // the quiet half of Caddy's two failure modes here. Returning an error would
@@ -309,11 +317,12 @@ func (m *Module) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error)
 	}
 
 	host := NormalizeHost(r.Host)
-	upstreams, outcome := m.routes.Document().Lookup(host, r.URL.Path)
+	upstreams, outcome, matched := m.routes.Document().Lookup(host, r.URL.Path)
 
 	ctx := r.Context()
 	caddyhttp.SetVar(ctx, HostVar, host)
 	caddyhttp.SetVar(ctx, RouteVar, string(outcome))
+	caddyhttp.SetVar(ctx, MatchVar, matched)
 
 	if outcome != OutcomeRoute {
 		return nil, nil

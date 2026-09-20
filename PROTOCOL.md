@@ -134,8 +134,7 @@ do nothing.
   "routes": [
     {
       "host": "app.dev.example",
-      "project": "p",
-      "env": "production",
+      "application": "p",
       "upstreams": [
         { "node": "vps-a", "address": "10.83.0.1:41001" },
         { "node": "vps-b", "address": "10.83.0.2:41001" }
@@ -154,8 +153,8 @@ do nothing.
 version is refused whole: the module keeps serving the last one it understood
 rather than routing against a shape this build cannot read.
 
-`routes` is sorted by `host` and names each host once. `project` and `env` are
-carried for the operator's benefit — the module reads neither.
+`routes` is sorted by `host` and names each host once. `application` is
+carried for the operator's benefit — the module does not read it.
 
 **`upstreams` is an ordered priority list, never a weighting.** The first entry
 is where the request goes; the rest exist for when it fails. This is the whole
@@ -170,11 +169,44 @@ absent route: the host exists and has nothing running behind it right now.
 `api` is absent when the node does not publish the fleet API. When present,
 `hosts` are the bare platform apexes routed to the daemon itself, `upstreams`
 are the daemon's own addresses ordered like a route's, and `denied` is the rule
-below.
+below. They are exact names; a wildcard is a route's to carry and never an
+`api` host's.
 
-An application route always wins over an `api` host of the same name. The
-daemon's renderer already omits such apexes, so this is a tie-break that should
-never be needed; the module applies it anyway rather than assume it of a peer.
+### Wildcard hosts
+
+A route's `host` may be a wildcard instead of a name: **exactly one leading
+`*.` label**, followed by a base that holds no `*` of its own, as in
+`*.example.com`. It is what an operator gets by claiming a custom domain
+together with its subdomains, and it is the only pattern the document may use —
+there is no other metacharacter and no other position for this one.
+
+**A wildcard covers exactly one label.** `*.example.com` covers
+`a.example.com`, and neither `b.a.example.com` nor `example.com` itself.
+
+A `host` carrying `*` in any other shape — `*` or `*.` alone, `a.*.example.com`,
+`*.*.example.com`, `*x.example.com` — is not a wildcard and is not a name
+either. The entry is ignored, as every other entry the module cannot use is,
+and it is indexed under neither reading: a pattern the two sides would resolve
+differently is the one thing worth refusing outright.
+
+### Resolving a host
+
+A request's host, lowercased and with any port removed, is resolved against the
+document in this order. The first match answers, and nothing else is consulted:
+
+1. **the route naming it exactly.** A route with an empty `upstreams` matches
+   here like any other: "this host exists and has nothing running" is an
+   answer, not an absence, and it never falls through to a wildcard.
+2. **an `api` host naming it exactly**, subject to [Denied paths](#denied-paths)
+   below. An application route therefore wins over an `api` host of the same
+   name — the daemon's renderer already omits such apexes, so that tie-break
+   should never be needed and the module applies it rather than assume it of a
+   peer — while a wildcard never takes a name away from the platform API.
+3. **the wildcard covering it**: the host with its first label replaced by `*`,
+   looked up once. Once, and not walked up the name, which is the same rule as
+   "a wildcard covers exactly one label" seen from the request's side.
+
+A host that none of the three matches is not served by the fleet.
 
 ### Denied paths
 

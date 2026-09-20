@@ -245,7 +245,11 @@ Besides the connection options it takes two of its own:
 The routing document is fetched in the background and cached, so a request costs
 a map lookup and no round trip to the daemon. A request's host, minus any port
 and lowercased, is the lookup key; a deployment's route wins over the platform's
-own API surface if they ever share a name.
+own API surface if they ever share a name. A host no route and no API host names
+exactly is tried once against the document's wildcard routes — `*.example.com`
+covers `a.example.com` and neither `b.a.example.com` nor `example.com` — so an
+exact route always wins over a wildcard one, including an exact route with
+nothing running behind it. See [Resolving a host](PROTOCOL.md#resolving-a-host).
 
 **One poller, not one per site block.** A snippet imported into twenty site
 blocks is twenty instances of this module, and they share a single poller and a
@@ -327,6 +331,11 @@ why, in two request variables, and leave the answer to a `handle_errors` route:
 | --- | --- |
 | `scafo.route` | `ok`, `denied`, `unknown` or `unavailable` |
 | `scafo.host` | the normalized host the lookup was keyed by |
+| `scafo.matched` | the document key that answered: a route host, a wildcard such as `*.example.com`, or an API host — empty when nothing matched |
+
+`scafo.host` is always the request's own host, whatever answered it;
+`scafo.matched` is the other half, and is what tells a wildcard's traffic apart
+from a route named for one deployment.
 
 - `ok` — the document named upstreams for this request. A `503` with `ok` means
   they were all unreachable.

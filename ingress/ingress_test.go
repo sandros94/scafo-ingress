@@ -14,22 +14,29 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 )
 
-// testDocument is the routing document the lookup tests resolve against: two
-// application hosts, one of them sharing a name with a platform apex, and a
-// fleet API section with the daemon's own denied prefixes.
+// testDocument is the routing document the lookup tests resolve against:
+// application hosts, one of them sharing a name with a platform apex, two
+// wildcard routes with exact hosts and a platform apex under them, and a fleet
+// API section with the daemon's own denied prefixes.
 const testDocument = `{
 	"v": 1,
 	"routes": [
-		{ "host": "api.dev.example", "project": "p", "env": "production",
+		{ "host": "api.dev.example", "application": "p",
 		  "upstreams": [ { "node": "vps-a", "address": "10.83.0.1:41001" } ] },
-		{ "host": "App.Dev.Example", "project": "p", "env": "production",
+		{ "host": "App.Dev.Example", "application": "p",
 		  "upstreams": [ { "node": "vps-a", "address": "10.83.0.1:41002" },
 		                 { "node": "vps-b", "address": "10.83.0.2:41002" } ] },
-		{ "host": "idle.dev.example", "project": "p", "env": "production",
-		  "upstreams": [] }
+		{ "host": "idle.dev.example", "application": "p",
+		  "upstreams": [] },
+		{ "host": "*.dev.example", "application": "p",
+		  "upstreams": [ { "node": "vps-c", "address": "10.83.0.3:41003" } ] },
+		{ "host": "*.Shop.Example", "application": "p",
+		  "upstreams": [ { "node": "vps-c", "address": "10.83.0.3:41004" } ] },
+		{ "host": "pinned.shop.example", "application": "p",
+		  "upstreams": [ { "node": "vps-a", "address": "10.83.0.1:41005" } ] }
 	],
 	"api": {
-		"hosts": ["dev.example", "api.dev.example"],
+		"hosts": ["dev.example", "api.dev.example", "ops.dev.example"],
 		"upstreams": [ { "node": "vps-a", "address": "127.0.0.1:7400" } ],
 		"denied": ["/v1/storage", "/v1/ingress/routes"]
 	}
@@ -64,6 +71,7 @@ func TestLookup(t *testing.T) {
 		path        string
 		wantDials   []string
 		wantOutcome Outcome
+		wantMatched string
 	}{
 		{
 			name:        "route",
@@ -71,6 +79,7 @@ func TestLookup(t *testing.T) {
 			path:        "/",
 			wantDials:   []string{"10.83.0.1:41002", "10.83.0.2:41002"},
 			wantOutcome: OutcomeRoute,
+			wantMatched: "app.dev.example",
 		},
 		{
 			// The document's own host casing must not decide whether a
@@ -80,6 +89,7 @@ func TestLookup(t *testing.T) {
 			path:        "/",
 			wantDials:   []string{"10.83.0.1:41002", "10.83.0.2:41002"},
 			wantOutcome: OutcomeRoute,
+			wantMatched: "app.dev.example",
 		},
 		{
 			// A route and an API host share this name; the route wins, and
@@ -90,16 +100,79 @@ func TestLookup(t *testing.T) {
 			path:        "/v1/storage",
 			wantDials:   []string{"10.83.0.1:41001"},
 			wantOutcome: OutcomeRoute,
+			wantMatched: "api.dev.example",
 		},
 		{
 			// The host exists and has nothing running behind it, which is a
 			// different answer from "no such host" and must not collapse
-			// into it.
+			// into it -- nor fall through to the wildcard covering it, which
+			// would answer one application's name with another's process.
 			name:        "a route with no upstreams still resolves",
 			host:        "idle.dev.example",
 			path:        "/",
 			wantDials:   []string{},
 			wantOutcome: OutcomeRoute,
+			wantMatched: "idle.dev.example",
+		},
+		{
+			name:        "a wildcard covers one label",
+			host:        "one.shop.example",
+			path:        "/",
+			wantDials:   []string{"10.83.0.3:41004"},
+			wantOutcome: OutcomeRoute,
+			wantMatched: "*.shop.example",
+		},
+		{
+			// The pattern's own casing is normalized like any other host's,
+			// and so is the request's.
+			name:        "a wildcard is matched case-insensitively",
+			host:        NormalizeHost("ONE.Shop.Example:8443"),
+			path:        "/",
+			wantDials:   []string{"10.83.0.3:41004"},
+			wantOutcome: OutcomeRoute,
+			wantMatched: "*.shop.example",
+		},
+		{
+			// One label, and the first one: the lookup is tried once, not
+			// walked up the name.
+			name:        "a wildcard does not cover two labels",
+			host:        "deep.one.shop.example",
+			path:        "/",
+			wantOutcome: OutcomeUnknown,
+		},
+		{
+			name:        "a wildcard does not cover its own base",
+			host:        "shop.example",
+			path:        "/",
+			wantOutcome: OutcomeUnknown,
+		},
+		{
+			name:        "an exact route beats a wildcard covering it",
+			host:        "pinned.shop.example",
+			path:        "/",
+			wantDials:   []string{"10.83.0.1:41005"},
+			wantOutcome: OutcomeRoute,
+			wantMatched: "pinned.shop.example",
+		},
+		{
+			// The wildcard *.dev.example covers this name too; the platform
+			// apex keeps it, because a wildcard must never be able to take a
+			// name away from the fleet API.
+			name:        "an api host beats a wildcard covering it",
+			host:        "ops.dev.example",
+			path:        "/v1/projects",
+			wantDials:   []string{"127.0.0.1:7400"},
+			wantOutcome: OutcomeRoute,
+			wantMatched: "ops.dev.example",
+		},
+		{
+			// And the denied rule of that surface is reached, rather than
+			// the request slipping onto the wildcard's upstreams.
+			name:        "an api host under a wildcard still denies its own paths",
+			host:        "ops.dev.example",
+			path:        "/v1/storage/objects/x",
+			wantOutcome: OutcomeDenied,
+			wantMatched: "ops.dev.example",
 		},
 		{
 			name:        "api host",
@@ -107,25 +180,26 @@ func TestLookup(t *testing.T) {
 			path:        "/v1/projects",
 			wantDials:   []string{"127.0.0.1:7400"},
 			wantOutcome: OutcomeRoute,
+			wantMatched: "dev.example",
 		},
 		{
 			name:        "api host, denied prefix exactly",
 			host:        "dev.example",
 			path:        "/v1/storage",
 			wantOutcome: OutcomeDenied,
-		},
+			wantMatched: "dev.example"},
 		{
 			name:        "api host, below a denied prefix",
 			host:        "dev.example",
 			path:        "/v1/storage/objects/certificates/x.crt",
 			wantOutcome: OutcomeDenied,
-		},
+			wantMatched: "dev.example"},
 		{
 			name:        "api host, denied prefix with a trailing separator",
 			host:        "dev.example",
 			path:        "/v1/storage/",
 			wantOutcome: OutcomeDenied,
-		},
+			wantMatched: "dev.example"},
 		{
 			// The boundary is a path segment, not a string prefix.
 			name:        "api host, a path that only starts like a denied one",
@@ -133,20 +207,20 @@ func TestLookup(t *testing.T) {
 			path:        "/v1/storagex",
 			wantDials:   []string{"127.0.0.1:7400"},
 			wantOutcome: OutcomeRoute,
-		},
+			wantMatched: "dev.example"},
 		{
 			name:        "api host, a sibling of a denied prefix",
 			host:        "dev.example",
 			path:        "/v1/ingress/ask",
 			wantDials:   []string{"127.0.0.1:7400"},
 			wantOutcome: OutcomeRoute,
-		},
+			wantMatched: "dev.example"},
 		{
 			name:        "api host, a deeper denied prefix",
 			host:        "dev.example",
 			path:        "/v1/ingress/routes",
 			wantOutcome: OutcomeDenied,
-		},
+			wantMatched: "dev.example"},
 		{
 			// The daemon may or may not collapse dot segments before it
 			// routes; a path that reaches a denied prefix under either
@@ -155,7 +229,7 @@ func TestLookup(t *testing.T) {
 			host:        "dev.example",
 			path:        "/public/../v1/storage/objects/x",
 			wantOutcome: OutcomeDenied,
-		},
+			wantMatched: "dev.example"},
 		{
 			name:        "unknown host",
 			host:        "nobody.example",
@@ -172,13 +246,16 @@ func TestLookup(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			upstreams, outcome := doc.Lookup(tt.host, tt.path)
+			upstreams, outcome, matched := doc.Lookup(tt.host, tt.path)
 			if outcome != tt.wantOutcome {
 				t.Errorf("outcome = %q, want %q", outcome, tt.wantOutcome)
 			}
 			got := dials(upstreams)
 			if strings.Join(got, ",") != strings.Join(tt.wantDials, ",") {
 				t.Errorf("dials = %v, want %v", got, tt.wantDials)
+			}
+			if matched != tt.wantMatched {
+				t.Errorf("matched key = %q, want %q", matched, tt.wantMatched)
 			}
 		})
 	}
@@ -189,25 +266,93 @@ func TestLookupWithoutDocument(t *testing.T) {
 	// host": an operator turning unknown hosts into 404 must not turn a cold
 	// start into one too.
 	var doc *Document
-	upstreams, outcome := doc.Lookup("app.dev.example", "/")
+	upstreams, outcome, matched := doc.Lookup("app.dev.example", "/")
 	if outcome != OutcomeUnavailable {
 		t.Errorf("outcome = %q, want %q", outcome, OutcomeUnavailable)
 	}
 	if len(upstreams) != 0 {
 		t.Errorf("upstreams = %v, want none", dials(upstreams))
 	}
+	if matched != "" {
+		t.Errorf("matched key = %q, want none", matched)
+	}
+}
+
+// TestLookupIgnoresAMalformedWildcard covers the document entries this module
+// cannot read as a pattern. A wildcard is exactly one leading "*." label and no
+// other asterisk; anything else is dropped the way every other unusable entry
+// is, rather than being indexed as a name of its own or guessed at.
+func TestLookupNeverMatchesARequestCarryingAnAsterisk(t *testing.T) {
+	doc := parseDocument(t, `{"v":1,"routes":[
+		{"host":"*.shop.example","upstreams":[{"node":"vps-a","address":"10.83.0.1:1"}]}
+	]}`)
+	for _, host := range []string{"*.shop.example", "a*.shop.example", ".shop.example"} {
+		if _, outcome, _ := doc.Lookup(host, "/"); outcome != OutcomeUnknown {
+			t.Errorf("Lookup(%q) = %v, want unknown", host, outcome)
+		}
+	}
+}
+
+func TestLookupIgnoresAMalformedWildcard(t *testing.T) {
+	doc := parseDocument(t, `{"v":1,"routes":[
+		{"host":"*","upstreams":[{"node":"vps-a","address":"10.83.0.1:1"}]},
+		{"host":"*.","upstreams":[{"node":"vps-a","address":"10.83.0.1:2"}]},
+		{"host":"*.*.dev.example","upstreams":[{"node":"vps-a","address":"10.83.0.1:3"}]},
+		{"host":"a.*.dev.example","upstreams":[{"node":"vps-a","address":"10.83.0.1:4"}]},
+		{"host":"**.dev.example","upstreams":[{"node":"vps-a","address":"10.83.0.1:5"}]},
+		{"host":"*x.dev.example","upstreams":[{"node":"vps-a","address":"10.83.0.1:6"}]},
+		{"host":"ok.dev.example","upstreams":[{"node":"vps-a","address":"10.83.0.1:7"}]}
+	]}`)
+
+	for _, host := range []string{
+		// Nothing above covers a name...
+		"one.dev.example",
+		"a.b.dev.example",
+		"dev.example",
+		// ...and none of the malformed patterns is a host either.
+		"*.dev.example",
+		"a.*.dev.example",
+		"*x.dev.example",
+	} {
+		if _, outcome, matched := doc.Lookup(host, "/"); outcome != OutcomeUnknown {
+			t.Errorf("Lookup(%q) = %q via %q, want %q", host, outcome, matched, OutcomeUnknown)
+		}
+	}
+
+	// The well-formed entry beside them is unaffected.
+	if _, outcome, _ := doc.Lookup("ok.dev.example", "/"); outcome != OutcomeRoute {
+		t.Errorf("outcome = %q, want %q", outcome, OutcomeRoute)
+	}
+}
+
+// TestLookupRepeatedWildcardKeepsTheFirst mirrors the rule for repeated names:
+// the document holds each key once, and a daemon that repeats one anyway must
+// not make the answer depend on how far the scan got.
+func TestLookupRepeatedWildcardKeepsTheFirst(t *testing.T) {
+	doc := parseDocument(t, `{"v":1,"routes":[
+		{"host":"*.dev.example","upstreams":[{"node":"vps-a","address":"10.83.0.1:41001"}]},
+		{"host":"*.DEV.example","upstreams":[{"node":"vps-b","address":"10.83.0.2:41001"}]}
+	]}`)
+
+	upstreams, outcome, matched := doc.Lookup("one.dev.example", "/")
+	if outcome != OutcomeRoute || matched != "*.dev.example" {
+		t.Fatalf("outcome = %q via %q, want %q via %q", outcome, matched, OutcomeRoute, "*.dev.example")
+	}
+	if got := dials(upstreams); strings.Join(got, ",") != "10.83.0.1:41001" {
+		t.Errorf("dials = %v, want the first entry's", got)
+	}
 }
 
 func TestLookupWithoutAPISection(t *testing.T) {
 	// A node that does not publish the fleet API sends no api member at all,
 	// and every host it does not route is simply unknown.
-	doc := parseDocument(t, `{"v":1,"routes":[{"host":"app.dev.example","project":"p","env":"production",
+	doc := parseDocument(t, `{"v":1,"routes":[{"host":"app.dev.example","application":"p",
 		"upstreams":[{"node":"vps-a","address":"10.83.0.1:41002"}]}]}`)
 
-	if _, outcome := doc.Lookup("dev.example", "/v1/storage"); outcome != OutcomeUnknown {
+	if _, outcome, _ := doc.Lookup("dev.example", "/v1/storage"); outcome != OutcomeUnknown {
 		t.Errorf("outcome = %q, want %q", outcome, OutcomeUnknown)
 	}
-	if _, outcome := doc.Lookup("app.dev.example", "/v1/storage"); outcome != OutcomeRoute {
+	if _, outcome, _ := doc.Lookup("app.dev.example", "/v1/storage"); outcome != OutcomeRoute {
 		t.Errorf("outcome = %q, want %q", outcome, OutcomeRoute)
 	}
 }
@@ -315,7 +460,7 @@ func TestFetchSendsCredentialsAndPreference(t *testing.T) {
 	if got := *server.lastPrefer.Load(); got != "self" {
 		t.Errorf("prefer = %q, want %q", got, "self")
 	}
-	upstreams, outcome := doc.Lookup("app.dev.example", "/")
+	upstreams, outcome, _ := doc.Lookup("app.dev.example", "/")
 	if outcome != OutcomeRoute {
 		t.Fatalf("outcome = %q, want %q", outcome, OutcomeRoute)
 	}
@@ -418,17 +563,17 @@ func TestRefreshKeepsTheLastGoodDocument(t *testing.T) {
 	// restart must not take the ingress down with it.
 	server.status.Store(http.StatusServiceUnavailable)
 	routes.Refresh(context.Background())
-	if _, outcome := routes.Document().Lookup("app.dev.example", "/"); outcome != OutcomeRoute {
+	if _, outcome, _ := routes.Document().Lookup("app.dev.example", "/"); outcome != OutcomeRoute {
 		t.Errorf("outcome after a failed refresh = %q, want %q", outcome, OutcomeRoute)
 	}
 
 	// And a daemon that comes back replaces it.
-	moved := `{"v":1,"routes":[{"host":"app.dev.example","project":"p","env":"production",
+	moved := `{"v":1,"routes":[{"host":"app.dev.example","application":"p",
 		"upstreams":[{"node":"vps-b","address":"10.83.0.2:41002"}]}]}`
 	server.body.Store(&moved)
 	server.status.Store(http.StatusOK)
 	routes.Refresh(context.Background())
-	upstreams, _ := routes.Document().Lookup("app.dev.example", "/")
+	upstreams, _, _ := routes.Document().Lookup("app.dev.example", "/")
 	if got := dials(upstreams); strings.Join(got, ",") != "10.83.0.2:41002" {
 		t.Errorf("dials after recovery = %v, want the new document's", got)
 	}
@@ -445,7 +590,7 @@ func TestRefreshWithoutADocumentLeavesNone(t *testing.T) {
 	if routes.Document() != nil {
 		t.Fatal("Document is set after a refresh that never succeeded")
 	}
-	if _, outcome := routes.Document().Lookup("app.dev.example", "/"); outcome != OutcomeUnavailable {
+	if _, outcome, _ := routes.Document().Lookup("app.dev.example", "/"); outcome != OutcomeUnavailable {
 		t.Errorf("outcome = %q, want %q", outcome, OutcomeUnavailable)
 	}
 }

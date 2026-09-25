@@ -5,24 +5,34 @@ checks, and how this repository follows Caddy's releases.
 
 ## Layout
 
-One Go module, one Caddy binary, a package per Caddy module:
+One Go module, one Caddy binary, a package per Caddy module — plus the app
+every one of them reads:
 
 | Path | What lives there |
 | --- | --- |
 | `scafo.go` | the repository root, which imports every module below so that naming the root in `xcaddy build` compiles them all |
-| `storage/` | `caddy.storage.scafo`, the certmagic storage client |
-| `ingress/` | `http.reverse_proxy.upstreams.scafo`, the routing-document poller and the dynamic upstreams source over it |
-| `internal/nodeapi/` | what every module needs to reach the node daemon: the `endpoint`/`token`/`token_file` options and their resolution, and the daemon's problem+json errors |
-| `examples/` | a Caddyfile using both modules together, kept working by hand rather than by CI |
+| `fleets/` | the `scafo` app: the fleets an operator declares, the poller each one gets, the environment form, the DNS providers, and the one cross-fleet view of "who serves this name" that every module reads |
+| `storage/` | `caddy.storage.scafo`: the certmagic storage client, and the router that sends each key to the fleet owning the domain it names |
+| `ingress/` | `http.reverse_proxy.upstreams.scafo` and `http.matchers.scafo_plain_http` |
+| `permission/` | `tls.permission.scafo`, the on-demand TLS decision |
+| `internal/nodeapi/` | what every module needs to reach a node daemon: the `endpoint`/`token`/`token_file` options and their resolution, and the daemon's problem+json errors |
+| `internal/e2e/` | the scripted Docker integration proof — stub nodes, a local ACME CA, the built image run with environment variables only. See [internal/e2e/README.md](internal/e2e/README.md) |
+| `image/Caddyfile` | the default configuration the published image ships at `/etc/caddy/Caddyfile`, which needs nothing but environment variables |
+| `examples/Caddyfile` | the written-out multi-fleet equivalent of the above, kept working by hand rather than by CI |
 | `dns-providers.txt` | the DNS-01 providers compiled into the `-dns` flavour, one pinned Go module per line |
 
-`internal/nodeapi` holds what is shared *because* the daemon is shared, and
+`internal/nodeapi` holds what is shared *because* a daemon is shared, and
 nothing else. A module's own paths, headers and protocol version belong to that
 module, even when a second one ends up wanting something similar.
 
-Each module package is split the same way: the client and its types in a file
-named after the package, the Caddy module — registration, options, provisioning,
-Caddyfile — in `caddy.go`.
+`fleets/` is the only package with state of its own. Everything else is a thin
+Caddy wrapper over it: a module takes the app out of the `caddy.Context` in
+`Provision` and holds nothing but a pointer to it, which is what makes an
+endpoint and a token written down once mean the same thing in five places.
+
+Each module package is split the same way: the client and its types in files
+named after what they do, the Caddy module — registration, options,
+provisioning, Caddyfile — in `caddy.go`.
 
 `go.mod` is long out of proportion to this repository, and `ingress/` is why:
 `modules/caddyhttp/reverseproxy` is not importable without `caddyhttp`, which
@@ -33,7 +43,7 @@ the linker drops what a given build does not reach.
 
 ```sh
 go vet ./...
-go test ./...
+go test -race ./...
 docker build .                    # compiles the modules inside xcaddy against a real Caddy
 .github/scripts/check-pins.sh     # go.mod and the Dockerfile agree on Caddy
 
@@ -41,23 +51,46 @@ docker build .                    # compiles the modules inside xcaddy against a
 docker build --build-arg DNS_PROVIDERS="$(.github/scripts/dns-providers.sh)" .
 ```
 
-The tests run entirely against `net/http/httptest` servers and open no network
-connections. `docker build .` is the integration check: it is the only step that
-proves the modules still compile into a real Caddy binary, so run it before
-touching anything that faces Caddy's or CertMagic's interfaces.
+This repository's `go` directive tracks Caddy's, so **Go 1.25 is needed**. A Go
+1.21 or newer toolchain downloads it on its own — that is `GOTOOLCHAIN=auto`,
+which is the default — so the commands above work unchanged on a distribution
+shipping something older. If the toolchain is pinned to `local`, see
+[Running the Go toolchain in Docker](#running-the-go-toolchain-in-docker).
+
+The unit tests run entirely against `net/http/httptest` servers and open no
+network connections. `docker build .` is the compile-time integration check: it
+is the only step that proves the modules still compile into a real Caddy binary,
+so run it before touching anything that faces Caddy's or CertMagic's
+interfaces. The behavioural one is `internal/e2e`, which runs the built image
+against stub nodes and a local ACME CA.
+
+**Where a rule is tested matters here**, because the packages are not peers:
+
+- `fleets/` holds every rule with a decision in it — environment parsing and
+  each error it can produce, cross-fleet resolution and the sticky claim,
+  on-demand permission, the plain-HTTP answer, DNS provider selection by zone,
+  the delegation, and the automation-policy patterns. That is where a rule's
+  table test belongs.
+- `storage/` holds the key routing: one case per CertMagic key shape, built
+  with CertMagic's own `KeyBuilder` so that a change in how it lays out or
+  sanitizes a key breaks the test rather than quietly sending a certificate to
+  the wrong fleet.
+- `ingress/`, `permission/` and `storage/caddy.go` are wrappers, and their tests
+  cover what a wrapper owns: the module ID, the Caddyfile form, and refusing the
+  options that no longer exist. Do not reach for a Caddy context to test a rule
+  that can be tested in `fleets/`.
 
 The workflows are linted too, and their inline shell along with them:
 
 ```sh
 docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest
-shellcheck .github/scripts/*.sh
+shellcheck .github/scripts/*.sh internal/e2e/*.sh
 ```
 
 ### Running the Go toolchain in Docker
 
-This repository's `go` directive tracks Caddy's, which is routinely newer than
-the Go a distribution ships. When the local toolchain is too old, run it in a
-container instead of installing a second Go by hand:
+When the local toolchain is too old and downloading one is not wanted, run it in
+a container instead of installing a second Go by hand:
 
 ```sh
 docker run --rm -v "$PWD":/w -w /w golang:1.25 go vet ./...
@@ -66,6 +99,22 @@ docker run --rm -v "$PWD":/w -w /w golang:1.25 go test -race ./...
 
 `docker build .` and `check-pins.sh` need no such wrapper — the first brings its
 own toolchain in the builder image, the second is shell and `sed`.
+
+### The default Caddyfile
+
+`image/Caddyfile` is configuration, not code, and nothing compiles it, so change
+it with the same care as a module:
+
+```sh
+docker build -t scafo-caddy .
+docker run --rm -v "$PWD/image":/w scafo-caddy caddy fmt --overwrite /w/Caddyfile
+docker run --rm \
+  -e SCAFO_FLEET_ENDPOINT=http://127.0.0.1:7400 -e SCAFO_FLEET_TOKEN=t \
+  scafo-caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+`examples/Caddyfile` is the written-out version of the same thing. When one
+changes, check the other.
 
 ## The two flavours
 
@@ -131,6 +180,14 @@ inside xcaddy against the new Caddy, both flavours, since a new Caddy can break
 a pinned provider as readily as it can break these modules — and only then
 pushes `chore: track caddy vX.Y.Z` to `main`, cuts the next **patch** release of
 this repository, and publishes its images and binaries.
+
+Two things here read Caddy's internals closely enough to be worth a look when a
+bump goes red. `fleets/wildcards.go` depends on how CertMagic's `MatchWildcard`
+decides whether an automation policy applies to a subject, and pins that
+behaviour in a test of its own. `storage/keys.go` depends on the shape of every
+storage key CertMagic builds, and `storage/keys_test.go` builds them with
+CertMagic's own `KeyBuilder` so a change shows up as a failure rather than as a
+misrouted certificate.
 
 Releases therefore carry two versions that mean different things: the tag is
 this repository's semver, and the release notes and the `caddy-version` asset

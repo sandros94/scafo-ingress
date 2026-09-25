@@ -27,7 +27,7 @@ func newTestStorage(t *testing.T, handler http.Handler) *Storage {
 	if err != nil {
 		t.Fatalf("parsing test server URL: %v", err)
 	}
-	return NewStorage(base, testToken)
+	return NewStorage(base, testToken, 0)
 }
 
 // notFound writes the daemon's 404 response, including a problem document so
@@ -542,7 +542,7 @@ func TestEndpointPathPrefixIsPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing base URL: %v", err)
 	}
-	storage := NewStorage(base, testToken)
+	storage := NewStorage(base, testToken, 0)
 
 	if err := storage.Store(context.Background(), "k", []byte("v")); err != nil {
 		t.Fatalf("Store: %v", err)
@@ -553,8 +553,13 @@ func TestEndpointPathPrefixIsPreserved(t *testing.T) {
 }
 
 func TestNewStorageUsesBoundedTimeout(t *testing.T) {
-	storage := NewStorage(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, testToken)
+	storage := NewStorage(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, testToken, 0)
 	if storage.client.Timeout != DefaultRequestTimeout {
 		t.Errorf("client timeout = %v, want %v", storage.client.Timeout, DefaultRequestTimeout)
+	}
+	// A fleet may bound its own requests more tightly than the default.
+	tighter := NewStorage(&url.URL{Scheme: "http", Host: "127.0.0.1:1"}, testToken, 5*time.Second)
+	if tighter.client.Timeout != 5*time.Second {
+		t.Errorf("client timeout = %v, want 5s", tighter.client.Timeout)
 	}
 }

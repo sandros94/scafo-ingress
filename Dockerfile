@@ -50,3 +50,8 @@ RUN set -eu; \
 FROM caddy:${CADDY_VERSION}
 
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+
+# The default configuration, which needs nothing but environment variables:
+# no Caddyfile to upload, no volume to bind. Mounting a Caddyfile of your own
+# over /etc/caddy/Caddyfile replaces it.
+COPY image/Caddyfile /etc/caddy/Caddyfile

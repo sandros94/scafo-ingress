@@ -1,82 +1,155 @@
-# A complete scafo ingress, using both modules in this repository.
+# A complete scafo ingress in front of two fleets, with every setting written
+# out rather than read from the environment.
 #
-# It expects a scafo node daemon on loopback at 127.0.0.1:7400 and one shared
-# environment variable, SCAFO_INGRESS_TOKEN. Replace dev.example with your
-# platform domain and the DNS provider with yours; everything else is meant to
-# be usable as it stands.
+# This is image/Caddyfile -- what the published image ships and runs with
+# nothing but environment variables -- with the scafo block filled in by hand.
+# The two are meant to stay in step: if you change one, look at the other.
 #
-# The `dns cloudflare` line needs the -dns flavour -- ghcr.io/sandros94/
+# Start here when you want something the default cannot do: a third site, your
+# own error page, headers, a fleet reached over a private network rather than
+# loopback. Mount it over /etc/caddy/Caddyfile and it replaces the default
+# entirely.
+#
+# The `dns cloudflare` block needs the -dns flavour -- ghcr.io/sandros94/
 # scafo-caddy:latest-dns, or scafo-caddy-dns-linux-<arch>. Everything else here
-# runs on either flavour, and dropping the tls block puts the whole file on the
-# lean one at the cost of per-name HTTP-01 issuance.
+# runs on either flavour; dropping the dns and acme_delegation lines puts the
+# whole file on the lean one, at the cost of the managed wildcards.
 #
 # See README.md for what each piece is for, and PROTOCOL.md for the contract
-# with the daemon.
-
+# with the daemons.
 {
-	# Certificates, keys and ACME account data live in the bucket the node
-	# daemon owns. Caddy never sees the bucket credentials.
-	storage scafo {
-		endpoint http://127.0.0.1:7400
-		token    {env.SCAFO_INGRESS_TOKEN}
-	}
+	# Everything about the fleets lives here, once. No other directive below
+	# carries an endpoint or a token: `storage scafo`, `dynamic scafo` and
+	# `permission scafo` all read this app.
+	#
+	# Declaring a fleet here means the environment is not consulted for fleets
+	# at all -- the two forms never half-merge. Delete the fleets and this
+	# becomes `scafo { }`, which is the default Caddyfile.
+	scafo {
+		# One client, on the machine next door.
+		fleet client-a {
+			endpoint http://10.0.0.1:7400
+			token {env.SCAFO_TOKEN_CLIENT_A}
 
-	# The daemon decides which customer domains it will issue for. This
-	# endpoint is public-facing input to a private decision, so it is the one
-	# scafo path Caddy calls without a token.
-	on_demand_tls {
-		ask http://127.0.0.1:7400/v1/ingress/ask
-	}
-}
-
-# Everything both site blocks share: where a request goes, and what happens
-# when it goes nowhere.
-(scafo) {
-	reverse_proxy {
-		# Where this request goes is the daemon's answer, polled in the
-		# background and cached, not a backend address written down here.
-		dynamic scafo {
-			endpoint http://127.0.0.1:7400
-			token    {env.SCAFO_INGRESS_TOKEN}
-
-			# Put this node's own upstreams first, so a request that
-			# arrives here stays here whenever it can. Name another
-			# node's id to prefer that one instead, or `none` to take
-			# the fleet's own order.
-			prefer        self
+			# Put this node's own upstreams first, so a request that arrives
+			# here stays here whenever it can. Name another node's id to prefer
+			# that one instead, or `none` to take the fleet's own order.
+			prefer self
 			poll_interval 5s
 		}
 
-		# The daemon's order is a priority, not a weighting, so take it at
-		# its word: first is the head of the list, and the rest are reached
-		# for only when the head fails.
+		# Another client, whose token arrives as a file -- the better fit
+		# wherever a credential manager hands one over as a path.
 		#
-		# Caddy stops retrying at whichever of lb_retries and
-		# lb_try_duration it reaches first, waiting lb_try_interval
-		# (250ms) in between -- so this budget is two attempts and about
-		# half a second. A request to a host the fleet does not serve
-		# spends the same budget before it can be answered as a 404
-		# below, and retrying an empty answer never changes it, so keep
-		# the retry count low.
-		lb_policy       first
-		lb_retries      2
+		# This one is served over plain HTTP as well as HTTPS: its hosts are
+		# not redirected, and every other fleet behind this Caddy still is.
+		# Useful behind a TLS-terminating load balancer of somebody else's.
+		fleet client-b {
+			endpoint http://10.0.0.2:7400
+			token_file /run/secrets/scafo-client-b
+			http_redirect off
+		}
+
+		# The DNS credentials the managed wildcard certificates are obtained
+		# with. Every option in the block is one of the provider module's own
+		# JSON fields, except `zones`.
+		#
+		# Listing the zones is what matters operationally: a wildcard base
+		# inside one of them is picked up whenever a fleet starts asking for
+		# it, with no reload, and a base outside all of them is delegated.
+		dns cloudflare {
+			zones apps.example.com other.example.com
+			api_token {env.CLOUDFLARE_API_TOKEN}
+		}
+
+		# Where a delegated DNS challenge is written. A customer pointing
+		# shop.customer.example at this ingress creates two records, once:
+		#
+		#   shop.customer.example.                A     <this ingress>
+		#   _acme-challenge.shop.customer.example. CNAME acme.example.com.
+		#
+		# After that, every challenge for that base is written at
+		# acme.example.com in the zone above -- their zone is never touched,
+		# and this Caddy needs no credential of theirs.
+		acme_delegation acme.example.com
+		acme_email ops@example.com
+
+		# acme_ca is deliberately absent: unset means Caddy's default CA.
+		# Point it at a local CA only for testing, never at production from a
+		# test.
+	}
+
+	# Certificates and private keys go into the bucket of whichever fleet owns
+	# the name -- through that fleet's node, with that fleet's token, and never
+	# another's. The ACME account and Caddy's own housekeeping name no fleet,
+	# so they stay on this machine under the Caddy data directory. Keep /data.
+	storage scafo
+
+	# Who may get a certificate on demand: only a name some fleet's routing
+	# document names exactly. A name covered merely by a wildcard is refused
+	# here, deliberately, and covered by the managed wildcard instead -- see
+	# README.md, "On-demand: exact names only, and that is a choice".
+	on_demand_tls {
+		permission scafo
+	}
+}
+
+# The access log. JSON, because it is meant to be read by something.
+#
+# Note that the scafo.fleet request variable does not reach it on its own:
+# Caddy's log encoder does not run in a request context. Telling one client's
+# traffic from another's in the log takes something that does run in one --
+# a response header, which the log records -- or reading scafo.host.
+(scafo_log) {
+	log {
+		output file {$SCAFO_ACCESS_LOG:/dev/stdout} {
+			mode 0644
+		}
+		format json
+	}
+}
+
+# Where a request goes: whatever the fleets' routing documents say right now,
+# polled in the background and resolved across all of them at once. No backend
+# address is written down here, so a deployment that moves costs no reload.
+(scafo_proxy) {
+	reverse_proxy {
+		dynamic scafo
+
+		# Each daemon's order is a priority, not a weighting, so take it at its
+		# word: first is the head of the list, and the rest are reached for
+		# only when the head fails.
+		#
+		# Caddy stops retrying at whichever of lb_retries and lb_try_duration
+		# it reaches first, waiting lb_try_interval (250ms) in between -- so
+		# this budget is two attempts and about half a second. A request to a
+		# host no fleet serves spends the same budget before it can be answered
+		# as a 404 below, and retrying an empty answer never changes it, so
+		# keep the retry count low.
+		lb_policy first
+		lb_retries 2
 		lb_try_duration 5s
 
 		# Passive health checking: an upstream that fails once is skipped for
 		# thirty seconds, which is what makes "the rest" above mean anything.
-		# Exactly once, because `first` keeps choosing an upstream until it
-		# is marked down, and a higher max_fails would spend every retry of
-		# one request on the same dead process.
+		# Exactly once, because `first` keeps choosing an upstream until it is
+		# marked down, and a higher max_fails would spend every retry of one
+		# request on the same dead process.
 		fail_duration 30s
-		max_fails     1
+		max_fails 1
 	}
+}
 
+# What an unroutable request looks like. The module cannot choose a status code
+# -- returning no upstreams is a 503 in Caddy's vocabulary -- so it records why
+# instead, and this is where that becomes an answer.
+(scafo_errors) {
 	handle_errors {
-		# The module cannot choose a status code -- returning no upstreams is
-		# a 503 in Caddy's vocabulary -- so it records why instead, and this
-		# is where that becomes an answer. `unknown` is a host the fleet does
-		# not serve; `denied` is a fleet API path that must never be proxied,
-		# and is answered the same way so as not to confirm it exists.
+		# `unknown` is a host no fleet serves; `denied` is a fleet API path
+		# that must never be proxied, and is answered the same way so as not to
+		# confirm it exists. `unavailable` is deliberately not in this list: it
+		# means not one daemon has answered yet, which is a cold start rather
+		# than a missing deployment, and a 503 is the honest answer to it.
 		@missing vars scafo.route unknown denied
 		handle @missing {
 			respond <<HTML
@@ -93,33 +166,50 @@
 		}
 
 		# Everything else keeps the status it had: `ok` with every upstream
-		# down, `unavailable` while the daemon has not answered yet, and any
-		# other handler error on the way through.
+		# down, `unavailable` while no daemon has answered yet, and any other
+		# handler error on the way through.
 		respond "{err.status_code} {err.status_text}" {err.status_code}
 	}
 }
 
-# The platform domain and every deployment under it, on one wildcard
-# certificate. DNS-01 is the suggested default: it needs no inbound request per
-# name, so a deployment is reachable the moment the daemon routes it.
+# Plain HTTP.
 #
-# Without the -dns flavour or without DNS credentials, drop the tls block and
-# Caddy issues per name over HTTP-01 instead -- correct, but each new subdomain
-# then waits for its own issuance.
-*.dev.example, dev.example {
-	tls {
-		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
-		resolvers 1.1.1.1
+# A fleet configured with `http_redirect off` -- client-b above -- is served
+# here as it is; every other host is redirected to HTTPS, which is the default
+# and is what a host no fleet owns gets too.
+#
+# The matcher is what makes that decision per request rather than per site
+# block. Caddy's automatic HTTPS redirects are built from the host names written
+# in the configuration, and this ingress has none: it serves whatever the
+# routing documents currently say, and the answer changes without a reload.
+#
+# The ACME HTTP challenge is unaffected: Caddy answers it in the server itself,
+# before any route here runs.
+http:// {
+	import scafo_log
+
+	@plain scafo_plain_http
+	handle @plain {
+		import scafo_proxy
 	}
-	import scafo
+	handle {
+		redir https://{host}{uri} 308
+	}
+
+	import scafo_errors
 }
 
-# Customer domains pointed at this fleet. Every other name reaching the HTTPS
-# port lands here, and the daemon's ask endpoint decides whether it gets a
-# certificate at all.
+# Everything over HTTPS. One catch-all, because which names are served is the
+# fleets' to say and changes without a reload: a certificate is obtained on
+# demand for a name a fleet routes exactly, and covered by a managed wildcard
+# otherwise.
 https:// {
+	import scafo_log
+
 	tls {
 		on_demand
 	}
-	import scafo
+
+	import scafo_proxy
+	import scafo_errors
 }

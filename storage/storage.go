@@ -74,21 +74,26 @@ type Storage struct {
 var _ certmagic.Storage = (*Storage)(nil)
 
 // NewStorage returns a Storage that talks to the scafo node daemon at endpoint,
-// authenticating with the given bearer token.
+// authenticating with the given bearer token and bounding each request by
+// timeout.
 //
 // endpoint may include a path prefix (e.g. https://host/scafo); protocol paths
 // are appended to it. A nil endpoint or an empty token is a programming error
-// and yields a Storage that fails every request.
-func NewStorage(endpoint *url.URL, token string) *Storage {
+// and yields a Storage that fails every request. A timeout that is not
+// positive is replaced by DefaultRequestTimeout.
+func NewStorage(endpoint *url.URL, token string, timeout time.Duration) *Storage {
 	var base string
 	if endpoint != nil {
 		base = strings.TrimSuffix(endpoint.String(), "/")
+	}
+	if timeout <= 0 {
+		timeout = DefaultRequestTimeout
 	}
 	return &Storage{
 		base:  base,
 		token: token,
 		client: &http.Client{
-			Timeout: DefaultRequestTimeout,
+			Timeout: timeout,
 		},
 	}
 }

@@ -281,7 +281,7 @@ one has read the other — and every field value is a string:
 
 ```caddyfile
 dns bunny {
-	api_key {env.BUNNY_API_KEY}
+	access_key {env.BUNNY_API_KEY}
 }
 
 dns cf cloudflare {

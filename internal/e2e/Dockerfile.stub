@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+
+# The scafo node stand-in the integration proof runs two of. It is built from
+# this repository's own module so that it needs no dependencies at all.
+ARG GO_VERSION=1.25
+
+FROM golang:${GO_VERSION}-alpine AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY internal/e2e/stubnode ./internal/e2e/stubnode
+RUN CGO_ENABLED=0 go build -o /usr/bin/stubnode ./internal/e2e/stubnode
+
+FROM alpine:3.21
+COPY --from=builder /usr/bin/stubnode /usr/bin/stubnode
+ENTRYPOINT ["/usr/bin/stubnode"]

@@ -1,0 +1,135 @@
+# The Caddyfile the scafo-ingress image ships at /etc/caddy/Caddyfile.
+#
+# It needs nothing but environment variables. There is no file to upload and
+# no volume to bind: the fleets, their tokens, the DNS credentials and the ACME
+# settings are all read from the environment by the scafo app below, which is
+# declared here with an empty block so that it exists to be filled in. See
+# README.md for the whole list of variables.
+#
+# Mounting a Caddyfile of your own over this one replaces it entirely, and is
+# the supported way to do anything this file does not: extra sites, a different
+# error page, headers, rate limiting. examples/Caddyfile is a written-out
+# version of the same thing to start from.
+{
+	# Every fleet, DNS provider and ACME setting comes from the environment.
+	# Writing a fleet down here instead is what the Caddyfile form is for --
+	# and then the environment is not consulted at all, so the two can never
+	# be half-merged.
+	scafo {
+	}
+
+	# Certificates and private keys live in the bucket each fleet's node
+	# daemon owns, routed per name to the fleet that owns that name. The ACME
+	# account and Caddy's own housekeeping stay on this machine, under the
+	# Caddy data directory.
+	storage scafo
+
+	# Who may get a certificate on demand: only a name some fleet's routing
+	# document names exactly. A name covered merely by a wildcard is refused
+	# here and covered by the managed wildcard instead -- see README.
+	on_demand_tls {
+		permission scafo
+	}
+}
+
+# The access log. JSON, because it is meant to be read by something; the path
+# comes from SCAFO_ACCESS_LOG and is a file, with stdout the default.
+(scafo_log) {
+	log {
+		output file {$SCAFO_ACCESS_LOG:/dev/stdout} {
+			mode 0644
+		}
+		format json
+	}
+}
+
+# Where a request goes: whatever the fleets' routing documents say right now,
+# polled in the background. No backend address is written down here.
+(scafo_proxy) {
+	reverse_proxy {
+		dynamic scafo
+
+		# The daemon's order is a priority, not a weighting, so take it at its
+		# word: first is the head of the list, and the rest are reached for
+		# only when the head fails. Keep the retry budget small -- a dynamic
+		# upstream that resolved to nothing resolves to nothing again.
+		lb_policy first
+		lb_retries 2
+		lb_try_duration 5s
+
+		# Passive health checking, which is what makes "the rest" mean
+		# anything. Exactly one failure, because `first` keeps choosing an
+		# upstream until it is marked down.
+		fail_duration 30s
+		max_fails 1
+	}
+}
+
+# What an unroutable request looks like. The module cannot choose a status code
+# -- returning no upstreams is a 503 in Caddy's vocabulary -- so it records why
+# instead, and this is where that becomes an answer.
+(scafo_errors) {
+	handle_errors {
+		# `unknown` is a host no fleet serves; `denied` is a fleet API path
+		# that must never be proxied, and is answered the same way so as not
+		# to confirm it exists.
+		@missing vars scafo.route unknown denied
+		handle @missing {
+			respond <<HTML
+				<!DOCTYPE html>
+				<html lang="en">
+				<head><meta charset="utf-8"><title>Not found</title></head>
+				<body style="font: 16px/1.6 system-ui, sans-serif; max-width: 32rem; margin: 12vh auto; padding: 0 1.5rem">
+				<h1 style="font-size: 1.25rem">Nothing is served here</h1>
+				<p>No deployment answers to <code>{http.vars.scafo.host}</code>.</p>
+				<p style="color: #666">scafo</p>
+				</body>
+				</html>
+				HTML 404
+		}
+
+		# Everything else keeps the status it had: `ok` with every upstream
+		# down, `unavailable` while no daemon has answered yet, and any other
+		# handler error on the way through.
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
+}
+
+# Plain HTTP.
+#
+# A fleet configured with `http_redirect off` is served here as it is; every
+# other host is redirected to HTTPS, which is the default and is what a host no
+# fleet owns gets too. The matcher is what makes that decision per request:
+# this ingress has no host names written down for automatic HTTPS to enumerate,
+# and the answer changes without a reload.
+#
+# The ACME HTTP challenge is unaffected: Caddy answers it in the server itself,
+# before any route here runs.
+http:// {
+	import scafo_log
+
+	@plain scafo_plain_http
+	handle @plain {
+		import scafo_proxy
+	}
+	handle {
+		redir https://{host}{uri} 308
+	}
+
+	import scafo_errors
+}
+
+# Everything over HTTPS. One catch-all, because which names are served is the
+# fleets' to say and changes without a reload: a certificate is obtained on
+# demand for a name a fleet routes exactly, and covered by a managed wildcard
+# otherwise.
+https:// {
+	import scafo_log
+
+	tls {
+		on_demand
+	}
+
+	import scafo_proxy
+	import scafo_errors
+}

@@ -5,13 +5,20 @@ This is the canonical description of the wire contract between
 normative: a daemon that satisfies everything below is a correct peer for these
 modules, and these modules send nothing beyond it.
 
-There is one protocol per module — `caddy.storage.scafo` speaks the first,
-`http.reverse_proxy.upstreams.scafo` the second — and they share a daemon, a
-base URL and a bearer token, nothing else. The base URL is each module's
-configured `endpoint`. A path prefix on that URL is preserved, so every path
-below is appended to it.
+There are two protocols — `caddy.storage.scafo` speaks the first, the routing
+poller behind `http.reverse_proxy.upstreams.scafo` and `tls.permission.scafo`
+speaks the second — and they share a daemon, a base URL and a bearer token,
+nothing else. The base URL and the token are one **fleet**'s, as the `scafo` app
+declares it. A path prefix on that URL is preserved, so every path below is
+appended to it.
 
-Both protocols report errors the same way; see [Errors](#errors) at the end.
+One ingress may hold several fleets at once, each with its own endpoint, token
+and document. **That is the consumer's concern, not the daemon's**: a daemon
+answers for itself and knows nothing about any other, and everything about how
+several documents are combined is in
+[Several fleets at once](#several-fleets-at-once) at the end.
+
+Both protocols report errors the same way; see [Errors](#errors).
 
 ## Storage protocol v1
 
@@ -21,7 +28,7 @@ Every request carries both:
 
 | Header | Value |
 | --- | --- |
-| `Authorization` | `Bearer <token>`, the trimmed token from `token` or `token_file` |
+| `Authorization` | `Bearer <token>`, the trimmed token from that fleet's `token` or `token_file` |
 | `X-Scafo-Storage-Version` | `1` |
 
 The version header exists so a daemon can reject a client it cannot serve.
@@ -40,6 +47,13 @@ individually and the `/` separators are preserved, so the daemon sees the same
 hierarchy the caller used. Keys passed as query parameters (`list`, `stat`) use
 ordinary form encoding.
 
+**Not every key CertMagic produces reaches a daemon.** Keys that name a domain
+are routed to the fleet that owns that domain; keys that name none — the ACME
+account, CertMagic's housekeeping, Caddy's own PKI and ECH assets — stay on the
+ingress's local disk and are never sent anywhere. That split is the ingress's,
+not the protocol's; see
+[Storage](README.md#storage-a-certificate-never-crosses-a-fleet).
+
 ### Endpoints
 
 | Method | Path | Request | Success | Not found |
@@ -55,7 +69,8 @@ ordinary form encoding.
 `GET /v1/storage/list` answers `404` when nothing exists at or under the
 prefix — a `200` response always carries at least one key. The distinction
 matters: CertMagic expects listing a missing prefix to be reported as "not
-found", not as an empty result.
+found", not as an empty result, and the ingress relies on it when it merges the
+listings of several fleets.
 
 ### Stat body
 
@@ -90,15 +105,18 @@ share one bucket, the way CertMagic's clustering is meant to work.
 `DELETE /v1/storage/locks/<name>` is idempotent and answers `204` even when the
 lock is not held.
 
+The only lock name a daemon sees is `issue_cert_<domain>`, for a domain it owns.
+CertMagic's other locks name no domain and are taken on the ingress's local
+disk.
+
 ### Client behaviour
 
-The module uses a dedicated HTTP client with a 30-second per-request timeout.
-That timeout does not bound `Lock`, which blocks until the lock is acquired or
-its context is done.
+Each fleet gets a dedicated HTTP client whose per-request timeout is that
+fleet's `storage_timeout` (30 seconds by default). That timeout does not bound
+`Lock`, which blocks until the lock is acquired or its context is done.
 
-It performs no retries other than the lock poll described above: the daemon is
-colocated, so a failure is a fault to report rather than a transient to paper
-over.
+It performs no retries other than the lock poll described above: a failure is a
+fault to report rather than a transient to paper over.
 
 ## Ingress protocol v1
 
@@ -145,7 +163,8 @@ do nothing.
     "hosts": ["dev.example"],
     "upstreams": [{ "node": "vps-a", "address": "127.0.0.1:7400" }],
     "denied": ["/v1/storage", "/v1/ingress/routes"]
-  }
+  },
+  "wildcards": ["dev.example"]
 }
 ```
 
@@ -189,6 +208,33 @@ either. The entry is ignored, as every other entry the module cannot use is,
 and it is indexed under neither reading: a pattern the two sides would resolve
 differently is the one thing worth refusing outright.
 
+### `wildcards`
+
+`wildcards` is an **optional** top-level member: an array of bases the fleet
+wants a `*.<base>` certificate for — its platform domains, and every custom
+domain claimed together with its subdomains.
+
+It is a list of **names**, not patterns: the base `example.com` asks for the
+certificate `*.example.com`. An entry carrying a `*` is a shape this build does
+not read and is dropped, as an unreadable route host is. Entries are lowercased,
+trimmed and deduplicated; a repeated base is one base.
+
+When a base also appears in that document's `api.hosts`, the bare name is wanted
+as well as the wildcard, because `*.example.com` does not cover `example.com`
+and the platform answers on both.
+
+**A node that publishes no `wildcards` keeps working exactly as before.** The
+member is absent, nothing is managed for that fleet, and its names are covered
+by on-demand issuance for the hosts it routes exactly. What the consumer does
+with the list, and what it cannot do, is in
+[Wildcard certificates](README.md#wildcard-certificates).
+
+`wildcards` is the fleet's *request*, not a claim about what exists: a base in
+it is not a route, does not make a host servable, and takes part in no routing
+decision. Its only other effect is on ownership — a `*.base` certificate belongs
+to the fleet that asked for `base`, when no fleet carries `*.base` as a route
+and none answers on `base` as a platform apex.
+
 ### Resolving a host
 
 A request's host, lowercased and with any port removed, is resolved against the
@@ -229,19 +275,23 @@ for this particular rule.
 
 ### Client behaviour
 
-The module polls this endpoint every `poll_interval` (5s by default), with a
-10-second per-request timeout, using a dedicated HTTP client. It waits the
-interval *between* attempts rather than on a schedule, so a slow answer delays
-the next request instead of stacking up behind it.
+Each fleet is polled every `poll_interval` (5s by default), with a per-fetch
+timeout of `timeout` (10s by default), using a dedicated HTTP client. The
+interval is waited *between* attempts rather than on a schedule, so a slow
+answer delays the next request instead of stacking up behind it.
 
-A daemon sees one poller per *configuration*, not one per `reverse_proxy`
-handler. What decides the answer or its cadence — the endpoint, the token,
-`prefer`, `poll_interval` — identifies a poller, and every handler asking for
-the same one shares it and the document it holds. A reload hands the running
-poller over rather than starting a second: the incoming configuration takes its
-reference before the outgoing one gives its own back, so polling never pauses
-and the last document that parsed keeps answering throughout. Polling stops when
-the last handler using it is cleaned up.
+A daemon sees **one poller per fleet**, not one per `reverse_proxy` handler —
+however many site blocks use `dynamic scafo`, the fetch happens once per
+interval. A reload hands the running poller over rather than starting a second:
+the incoming configuration takes its reference before the outgoing one gives its
+own back, so polling never pauses and the last document that parsed keeps
+answering throughout. Polling stops when the last configuration using that fleet
+has gone.
+
+A fetch whose bytes are identical to the last one's is **dropped rather than
+republished**. Nothing downstream can tell the difference, and it is what keeps
+work that depends on a change — rebuilding the cross-fleet view, logging a host
+conflict, reconsidering the wildcards — from happening once per poll.
 
 The first fetch is attempted while Caddy is provisioning, so a healthy pair
 starts already routing. **Its failure does not fail startup.** A daemon that is
@@ -250,14 +300,52 @@ back, so every fetch failure — at startup or later — is logged and outlived,
 the last document that parsed keeps answering requests. Failures are logged once
 per state change, not once per tick.
 
-Until a first document arrives there is nothing to route with, and the module
-says so distinctly rather than reporting every host as unknown; see
-[Unroutable requests](README.md#unroutable-requests).
-
 A daemon answers `503` with `urn:scafo:draining` until its first reconcile pass
 has completed: an empty document would read as every route withdrawn, where a
 failed fetch is a pause that keeps the last document answering. Treat it as any
 other failure, never as an empty document.
+
+## Several fleets at once
+
+Everything in this section is the **consumer's**, not the daemon's. A daemon
+serves one fleet and is entitled to assume nothing about any other; these are
+the rules the ingress applies when it has more than one document in hand.
+
+**Resolution spans every fleet at once**, in the order
+[Resolving a host](#resolving-a-host) gives: an exact route in any fleet, then a
+fleet API host in any fleet, then a wildcard route in any fleet. So an **exact
+route beats a wildcard across fleets**, exactly as it does within one.
+
+**A claim is sticky.** When two fleets publish the same host, the one that
+published it *first* keeps it for as long as it goes on publishing it. Only when
+that fleet stops does another get it, and when the first comes back the second
+keeps it — a host never flaps between two fleets. Two fleets claiming a host in
+the same refresh have no "first", so the order the fleets were configured in
+decides.
+
+Routes, `api` hosts and wildcards are **separate keyspaces**. One fleet holding
+`*.example` and another holding `a.example` is not a conflict; neither is one
+fleet routing `example.com` while another answers on it as a platform apex,
+though the route wins for a request.
+
+**A conflict is logged once per change**, naming the host, which keyspace it is
+in, which fleet serves it and which fleets claim it — and once more when it is
+resolved. Since a document that did not change is not republished, a standing
+conflict leaves one line behind rather than one per poll.
+
+**A fleet whose node is unreachable affects only its own hosts.** Its last
+document keeps answering; the other fleets neither know nor care.
+
+**`unavailable` means not one fleet has a document yet.** As soon as any fleet
+has answered, a host nobody names reads as `unknown` — including a host that
+belongs to a fleet that has not answered yet, which the ingress has no way to
+know about. A cold start is a distinct state; a partially cold start is not.
+
+**Ownership decides where a certificate lives**, and it is this same resolution
+plus one rule for a `*.base` subject: the fleet carrying `*.base` as a route,
+else the fleet answering on `base` as a platform apex, else a fleet that listed
+`base` in its `wildcards`. A domain nobody owns has no fleet, and the ingress
+refuses to guess one.
 
 ## Errors
 

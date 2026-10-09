@@ -12,7 +12,7 @@
 # It is an exact version rather than the floating "2" tag on purpose -- a
 # floating tag would silently pick up new Caddy releases, which is precisely
 # what the tracker exists to do deliberately, test, and record in a release.
-ARG CADDY_VERSION=2.11.4
+ARG CADDY_VERSION=2.11.7
 
 FROM caddy:${CADDY_VERSION}-builder AS builder
 

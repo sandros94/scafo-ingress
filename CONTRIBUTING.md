@@ -172,9 +172,13 @@ statement of which Caddy this repository tracks. `go.mod`'s Caddy requirement is
 held equal to it — CI fails if the two disagree — and the image, the release
 binaries and the `caddy-version` release asset are all built from it.
 
-**The automation.** Once a day, `.github/workflows/track-caddy.yml` compares the
-pin against Caddy's latest stable release. If they match it exits, quietly. If
-Caddy has moved it bumps `go.mod` and the pin together, runs the full check —
+**The automation.** Once a week, `.github/workflows/track-caddy.yml` compares
+the pin against Caddy's latest stable release. If they match it exits, quietly.
+If Caddy has moved it first asks the registry whether the official image has
+published that version — `caddy:<version>` and `caddy:<version>-builder`, which
+the `Dockerfile` builds from, and which can trail the GitHub release by days —
+and if it has not, the run says so and exits green, to ask again next week.
+Once the image is there it bumps `go.mod` and the pin together, runs the full check —
 `go vet`, `go test -race`, and the `docker build`s that compile these modules
 inside xcaddy against the new Caddy, both flavours, since a new Caddy can break
 a pinned provider as readily as it can break these modules — and only then

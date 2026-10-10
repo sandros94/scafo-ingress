@@ -2,11 +2,12 @@ name: track-caddy
 
 # Follows Caddy's stable releases without a human in the loop.
 #
-# Once a day: read the canonical pin (the Dockerfile's ARG default) and
-# caddyserver/caddy's latest stable release, and if they differ, move both the
-# pin and go.mod onto it, verify the result, push it to main, cut the next
-# PATCH release of this repository, and publish that release's images and binaries
-# -- all inside this one run.
+# Once a week: read the canonical pin (the Dockerfile's ARG default) and
+# caddyserver/caddy's latest stable release, and if they differ -- and the
+# official image has published that release, which can lag the tag by days --
+# move both the pin and go.mod onto it, verify the result, push it to main, cut
+# the next PATCH release of this repository, and publish that release's images
+# and binaries -- all inside this one run.
 #
 # It has to be one run. Events created with the default GITHUB_TOKEN do not
 # start workflow runs, so the push to main would build nothing and the release
@@ -75,10 +76,32 @@ jobs:
           if [ "$current" = "$latest" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Already tracking Caddy ${current}; nothing to do." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "Caddy ${current} to ${latest}." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+
+          # The image is the one thing a bump needs that nobody here publishes,
+          # and it can trail the GitHub release by days. A bump attempted inside
+          # that gap passes every Go check and then fails the docker build on a
+          # tag that does not exist yet, so "not yet" is nothing to do, not a
+          # failure. A registry that cannot be asked at all still fails the run.
+          set +e
+          said="$(.github/scripts/caddy-image-ready.sh "$latest" 2>&1)"
+          ready=$?
+          set -e
+          case "$ready" in
+            0)
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              echo "Caddy ${current} to ${latest}." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            1)
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "Caddy ${latest} is out, but the official image has not caught up (${said//$'\n'/; }). Nothing to do until it has." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "$said" >&2
+              exit "$ready"
+              ;;
+          esac
 
       - name: Move the pin
         if: steps.check.outputs.changed == 'true'

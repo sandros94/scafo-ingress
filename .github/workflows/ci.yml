@@ -30,9 +30,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           check-latest: true
@@ -69,7 +69,7 @@ jobs:
       matrix:
         flavor: [lean, dns]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: docker build
         env:
@@ -100,7 +100,7 @@ jobs:
       image-tags: ${{ steps.compute.outputs.tags }}
       dns-image-tags: ${{ steps.compute.outputs.dns-tags }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Compute image tags
         id: compute
